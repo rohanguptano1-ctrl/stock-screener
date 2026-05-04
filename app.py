@@ -5,9 +5,11 @@ import numpy as np
 from ta.momentum import RSIIndicator
 
 st.set_page_config(layout="wide")
-st.title("🧠 AI Equity Research Platform V4.1")
+st.title("🧠 AI Equity Research Platform V4.2")
 
+# -----------------------------
 # INPUT
+# -----------------------------
 tickers_input = st.text_input(
     "Enter tickers",
     "SUZLON.NS,IRCON.NS,NBCC.NS,HFCL.NS,IDFCFIRSTB.NS"
@@ -18,7 +20,9 @@ years = st.slider("Backtest Period (Years)", 1, 5, 1)
 tickers = [t.strip() for t in tickers_input.split(",")]
 run = st.button("Run Analysis + Backtest")
 
+# -----------------------------
 # DATA FETCH
+# -----------------------------
 @st.cache_data
 def fetch_data(ticker, period="1y"):
     try:
@@ -37,8 +41,11 @@ def fetch_data(ticker, period="1y"):
         return None
 
 
-# SCORE FUNCTION
+# -----------------------------
+# SCORING
+# -----------------------------
 def compute_score(hist):
+
     close = hist["Close"].dropna()
     if len(close) < 60:
         return None
@@ -51,9 +58,11 @@ def compute_score(hist):
 
     score = 5
 
+    # Trend
     if price > dma:
         score += 20
 
+    # RSI logic (trend-friendly)
     if 55 <= rsi <= 75:
         score += 20
     elif 45 <= rsi < 55:
@@ -61,6 +70,7 @@ def compute_score(hist):
     elif rsi > 75:
         score += 5
 
+    # Momentum
     if momentum > 0.15:
         score += 20
     elif momentum > 0:
@@ -70,15 +80,17 @@ def compute_score(hist):
 
 
 def recommendation(score):
-    if score >= 70:
+    if score >= 65:
         return "BUY"
-    elif score >= 50:
+    elif score >= 45:
         return "HOLD"
     else:
         return "AVOID"
 
 
+# -----------------------------
 # MAIN
+# -----------------------------
 if run:
 
     results = {}
@@ -115,16 +127,18 @@ if run:
     df["Rank"] = df["Score"].rank(pct=True)
 
     st.subheader("📊 Screener Output")
-    st.dataframe(df)
+    st.dataframe(df, use_container_width=True)
 
     # -----------------------------
-    # IMPROVED BACKTEST
+    # BACKTEST (BUY + HOLD)
     # -----------------------------
-    st.subheader("📈 Backtest Results (BUY Only)")
+    st.subheader("📈 Backtest Results (BUY + HOLD)")
+
+    selected = df[df["Recommendation"].isin(["BUY", "HOLD"])].index
 
     returns_list = []
 
-    for ticker in df[df["Recommendation"] == "BUY"].index:
+    for ticker in selected:
         hist = fetch_data(ticker, f"{years}y")
 
         if hist is None:
@@ -134,25 +148,28 @@ if run:
         returns_list.append(hist["Return"])
 
     if len(returns_list) == 0:
-        st.warning("No BUY signals → no backtest")
+        st.warning("No eligible stocks for backtest")
     else:
         combined = pd.concat(returns_list, axis=1)
 
         combined["Portfolio"] = combined.mean(axis=1)
         combined["Cumulative"] = (1 + combined["Portfolio"]).cumprod()
 
-        # Benchmark
+        # Benchmark (Nifty)
         nifty = yf.Ticker("^NSEI").history(period=f"{years}y")
         nifty["Return"] = nifty["Close"].pct_change()
         nifty["Cumulative"] = (1 + nifty["Return"]).cumprod()
 
-        st.line_chart(pd.DataFrame({
+        chart_df = pd.DataFrame({
             "Strategy": combined["Cumulative"],
             "Nifty": nifty["Cumulative"]
-        }))
+        }).dropna()
+
+        st.line_chart(chart_df)
 
         strategy_return = combined["Cumulative"].iloc[-1] - 1
         nifty_return = nifty["Cumulative"].iloc[-1] - 1
 
-        st.metric("Strategy Return", f"{round(strategy_return*100,2)}%")
-        st.metric("Nifty Return", f"{round(nifty_return*100,2)}%")
+        col1, col2 = st.columns(2)
+        col1.metric("Strategy Return", f"{round(strategy_return*100,2)}%")
+        col2.metric("Nifty Return", f"{round(nifty_return*100,2)}%")
