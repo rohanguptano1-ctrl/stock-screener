@@ -5,7 +5,7 @@ import numpy as np
 from ta.momentum import RSIIndicator
 
 st.set_page_config(layout="wide")
-st.title("🧠 AI Equity Research Platform V5 (Rebalancing Engine)")
+st.title("🚀 AI Equity Research Platform V5.1 (Aggressive Momentum)")
 
 # -----------------------------
 # INPUT
@@ -16,7 +16,7 @@ tickers_input = st.text_input(
 )
 
 years = st.slider("Backtest Period (Years)", 1, 5, 2)
-top_n = st.slider("Number of Stocks in Portfolio", 2, 6, 3)
+top_n = st.slider("Portfolio Size", 2, 6, 4)
 
 tickers = [t.strip() for t in tickers_input.split(",")]
 run = st.button("Run Strategy")
@@ -43,7 +43,7 @@ def fetch_full_data(ticker, period):
 
 
 # -----------------------------
-# SCORE FUNCTION
+# SCORE FUNCTION (AGGRESSIVE)
 # -----------------------------
 def compute_score_row(hist, i):
 
@@ -56,21 +56,27 @@ def compute_score_row(hist, i):
 
     momentum = price / hist["Close"].iloc[i-60] - 1
 
-    score = 5
+    # HARD FILTER (IMPORTANT)
+    if price < dma or momentum <= 0:
+        return None
 
-    if price > dma:
-        score += 20
+    score = 0
 
+    # Strong trend
+    score += 30
+
+    # Momentum heavy weight
+    if momentum > 0.20:
+        score += 40
+    elif momentum > 0.10:
+        score += 25
+    else:
+        score += 10
+
+    # RSI confirmation
     if 55 <= rsi <= 75:
         score += 20
-    elif 45 <= rsi < 55:
-        score += 10
     elif rsi > 75:
-        score += 5
-
-    if momentum > 0.15:
-        score += 20
-    elif momentum > 0:
         score += 10
 
     return score
@@ -81,7 +87,7 @@ def compute_score_row(hist, i):
 # -----------------------------
 if run:
 
-    st.subheader("📊 Running Monthly Rebalancing Backtest...")
+    st.subheader("📊 Running Aggressive Backtest...")
 
     data = {}
 
@@ -94,12 +100,14 @@ if run:
         st.warning("No data available")
         st.stop()
 
-    # Align dates
     dates = list(data[list(data.keys())[0]].index)
 
     portfolio_returns = []
 
-    for i in range(200, len(dates)-1, 21):  # monthly steps (~21 trading days)
+    # 🔥 Faster rebalancing (15 days)
+    step = 15
+
+    for i in range(200, len(dates)-step, step):
 
         scores = {}
 
@@ -113,27 +121,25 @@ if run:
                 scores[ticker] = score
 
         if len(scores) == 0:
+            portfolio_returns.append(0)
             continue
 
         # Pick top N
         selected = sorted(scores, key=scores.get, reverse=True)[:top_n]
 
-        # Compute next month return
         period_returns = []
 
         for ticker in selected:
             hist = data[ticker]
 
-            if i+21 < len(hist):
-                ret = hist["Close"].iloc[i+21] / hist["Close"].iloc[i] - 1
+            if i+step < len(hist):
+                ret = hist["Close"].iloc[i+step] / hist["Close"].iloc[i] - 1
                 period_returns.append(ret)
 
         if len(period_returns) > 0:
             portfolio_returns.append(np.mean(period_returns))
-
-    if len(portfolio_returns) == 0:
-        st.warning("No backtest results")
-        st.stop()
+        else:
+            portfolio_returns.append(0)
 
     # Convert to cumulative
     portfolio_series = pd.Series(portfolio_returns)
@@ -144,7 +150,6 @@ if run:
     nifty["Return"] = nifty["Close"].pct_change()
     nifty["Cumulative"] = (1 + nifty["Return"]).cumprod()
 
-    # Align lengths
     min_len = min(len(cumulative), len(nifty))
     cumulative = cumulative.iloc[:min_len]
     nifty = nifty.iloc[:min_len]
