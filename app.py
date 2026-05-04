@@ -6,47 +6,42 @@ from ta.momentum import RSIIndicator
 from textblob import TextBlob
 
 st.set_page_config(layout="wide")
-st.title("🧠 AI Equity Research Platform V3.2")
+st.title("🧠 AI Equity Research Platform V3.3")
 
-# -----------------------------
 # INPUT
-# -----------------------------
 tickers_input = st.text_input(
     "Enter tickers (comma separated)",
     "SUZLON.NS,IRCON.NS,NBCC.NS,HFCL.NS,IDFCFIRSTB.NS"
 )
 
 tickers = [t.strip() for t in tickers_input.split(",")]
-
 run = st.button("Run Analysis")
 
-# -----------------------------
 # DATA FETCH
-# -----------------------------
 @st.cache_data(show_spinner=False)
 def fetch_data(ticker):
     try:
         stock = yf.Ticker(ticker)
-
         hist = stock.history(period="1y")
 
         if hist.empty:
             return None
 
-        # PRICE FIX
         valid_close = hist["Close"].dropna()
         if valid_close.empty:
             return None
+
         price = float(valid_close.iloc[-1])
 
-        # TECHNICALS
         hist["200DMA"] = hist["Close"].rolling(200).mean()
         hist["RSI"] = RSIIndicator(hist["Close"], 14).rsi()
 
-        latest_rsi = hist["RSI"].dropna().iloc[-1]
-        latest_dma = hist["200DMA"].dropna().iloc[-1]
+        rsi = hist["RSI"].dropna().iloc[-1]
+        dma = hist["200DMA"].dropna().iloc[-1]
 
-        # FUNDAMENTALS (LIGHTWEIGHT)
+        # 3-month momentum
+        momentum = price / hist["Close"].iloc[-60] - 1 if len(hist) > 60 else 0
+
         try:
             info = stock.info
         except:
@@ -60,10 +55,11 @@ def fetch_data(ticker):
         return {
             "ticker": ticker,
             "price": price,
-            "rsi": latest_rsi,
-            "above_200dma": price > latest_dma,
-            "debt": info.get("debtToEquity", None),
+            "rsi": rsi,
+            "above_200dma": price > dma,
+            "momentum": momentum,
             "roe": info.get("returnOnEquity", None),
+            "debt": info.get("debtToEquity", None),
             "profit": info.get("netIncomeToCommon", None),
             "news": news if news else [],
             "hist": hist
@@ -73,51 +69,45 @@ def fetch_data(ticker):
         return None
 
 
-# -----------------------------
-# FUNDAMENTAL SCORE (SIMPLIFIED)
-# -----------------------------
+# FUNDAMENTALS (LIGHT WEIGHT)
 def fundamental_score(d):
-    score = 0
+    score = 5  # base score (IMPORTANT FIX)
 
-    # Profitability
     if d["profit"] is not None and d["profit"] > 0:
-        score += 15
+        score += 10
 
-    # ROE
     if d["roe"] is not None and d["roe"] > 0.12:
-        score += 10
+        score += 5
 
-    # Debt sanity
     if d["debt"] is not None and d["debt"] < 1:
-        score += 10
+        score += 5
 
-    return score  # max 35
+    return score  # max ~25
 
 
-# -----------------------------
-# TECHNICAL SCORE (STRONGER)
-# -----------------------------
+# TECHNICALS (PRIMARY DRIVER)
 def technical_score(d):
     score = 0
 
-    # Trend
     if d["above_200dma"]:
+        score += 20
+
+    if d["rsi"] is not None:
+        if 45 <= d["rsi"] <= 65:
+            score += 15
+        elif d["rsi"] > 70:
+            score -= 5
+
+    # momentum boost
+    if d["momentum"] > 0.10:
         score += 15
+    elif d["momentum"] > 0:
+        score += 5
 
-    # Momentum sweet spot
-    if d["rsi"] is not None and 45 <= d["rsi"] <= 65:
-        score += 15
-
-    # Avoid overbought
-    elif d["rsi"] is not None and d["rsi"] > 70:
-        score -= 5
-
-    return score  # max ~30
+    return score  # max ~50
 
 
-# -----------------------------
-# SENTIMENT (LIGHTWEIGHT)
-# -----------------------------
+# SENTIMENT
 def sentiment_score(news):
     scores = []
 
@@ -127,7 +117,7 @@ def sentiment_score(news):
         scores.append(blob.sentiment.polarity)
 
     if not scores:
-        return 3
+        return 5
 
     avg = np.mean(scores)
 
@@ -139,36 +129,31 @@ def sentiment_score(news):
         return 5
 
 
-# -----------------------------
-# TOTAL SCORE
-# -----------------------------
+# TOTAL
 def total_score(d):
-    f = fundamental_score(d)   # 35
-    t = technical_score(d)     # 30
-    s = sentiment_score(d["news"])  # 10
-
-    return f + t + s
+    return (
+        fundamental_score(d)
+        + technical_score(d)
+        + sentiment_score(d["news"])
+    )
 
 
 def recommendation(score):
-    if score >= 55:
+    if score >= 65:
         return "BUY"
-    elif score >= 40:
+    elif score >= 45:
         return "HOLD"
     else:
         return "AVOID"
 
 
-# -----------------------------
 # MAIN
-# -----------------------------
 if run:
 
     results = []
     data_store = {}
 
     for ticker in tickers:
-
         st.write(f"Fetching: {ticker}")
 
         d = fetch_data(ticker)
@@ -182,7 +167,9 @@ if run:
 
         sentiment_val = sentiment_score(d["news"])
         sentiment_label = (
-            "POSITIVE" if sentiment_val == 10 else "NEGATIVE" if sentiment_val == 0 else "NEUTRAL"
+            "POSITIVE" if sentiment_val == 10 else
+            "NEGATIVE" if sentiment_val == 0 else
+            "NEUTRAL"
         )
 
         results.append({
@@ -191,6 +178,7 @@ if run:
             "Score": score,
             "Recommendation": rec,
             "RSI": round(d["rsi"], 2),
+            "Momentum": round(d["momentum"] * 100, 2),
             "Sentiment": sentiment_label
         })
 
@@ -202,7 +190,6 @@ if run:
         st.warning("No valid data found")
         st.stop()
 
-    # Ranking
     df["Rank"] = df["Score"].rank(pct=True)
 
     df["Conviction"] = df["Rank"].apply(
@@ -212,7 +199,6 @@ if run:
     st.subheader("📊 Screener Output")
     st.dataframe(df, use_container_width=True)
 
-    # Portfolio
     st.subheader("📈 Top Picks Portfolio")
 
     top = df.sort_values("Score", ascending=False).head(5)
@@ -220,7 +206,6 @@ if run:
 
     st.dataframe(top, use_container_width=True)
 
-    # Charts
     for ticker in top["Ticker"]:
         d = data_store[ticker]
 
