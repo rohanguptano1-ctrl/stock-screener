@@ -6,7 +6,7 @@ from ta.momentum import RSIIndicator
 from textblob import TextBlob
 
 st.set_page_config(layout="wide")
-st.title("🧠 AI Equity Research Platform V3.3")
+st.title("🧠 AI Equity Research Platform V3.4")
 
 # INPUT
 tickers_input = st.text_input(
@@ -17,7 +17,7 @@ tickers_input = st.text_input(
 tickers = [t.strip() for t in tickers_input.split(",")]
 run = st.button("Run Analysis")
 
-# DATA FETCH
+# DATA
 @st.cache_data(show_spinner=False)
 def fetch_data(ticker):
     try:
@@ -27,11 +27,7 @@ def fetch_data(ticker):
         if hist.empty:
             return None
 
-        valid_close = hist["Close"].dropna()
-        if valid_close.empty:
-            return None
-
-        price = float(valid_close.iloc[-1])
+        price = float(hist["Close"].dropna().iloc[-1])
 
         hist["200DMA"] = hist["Close"].rolling(200).mean()
         hist["RSI"] = RSIIndicator(hist["Close"], 14).rsi()
@@ -39,7 +35,6 @@ def fetch_data(ticker):
         rsi = hist["RSI"].dropna().iloc[-1]
         dma = hist["200DMA"].dropna().iloc[-1]
 
-        # 3-month momentum
         momentum = price / hist["Close"].iloc[-60] - 1 if len(hist) > 60 else 0
 
         try:
@@ -69,9 +64,9 @@ def fetch_data(ticker):
         return None
 
 
-# FUNDAMENTALS (LIGHT WEIGHT)
+# FUNDAMENTALS
 def fundamental_score(d):
-    score = 5  # base score (IMPORTANT FIX)
+    score = 5
 
     if d["profit"] is not None and d["profit"] > 0:
         score += 10
@@ -82,29 +77,33 @@ def fundamental_score(d):
     if d["debt"] is not None and d["debt"] < 1:
         score += 5
 
-    return score  # max ~25
+    return score
 
 
-# TECHNICALS (PRIMARY DRIVER)
+# TECHNICALS (FIXED)
 def technical_score(d):
     score = 0
 
+    # Trend
     if d["above_200dma"]:
         score += 20
 
+    # RSI LOGIC FIXED
     if d["rsi"] is not None:
-        if 45 <= d["rsi"] <= 65:
-            score += 15
-        elif d["rsi"] > 70:
-            score -= 5
+        if 55 <= d["rsi"] <= 75:
+            score += 20   # STRONG TREND ZONE
+        elif 45 <= d["rsi"] < 55:
+            score += 10
+        elif d["rsi"] > 75:
+            score += 5    # still strong, just extended
 
-    # momentum boost
-    if d["momentum"] > 0.10:
-        score += 15
+    # Momentum
+    if d["momentum"] > 0.15:
+        score += 20
     elif d["momentum"] > 0:
-        score += 5
+        score += 10
 
-    return score  # max ~50
+    return score
 
 
 # SENTIMENT
@@ -139,9 +138,9 @@ def total_score(d):
 
 
 def recommendation(score):
-    if score >= 65:
+    if score >= 70:
         return "BUY"
-    elif score >= 45:
+    elif score >= 50:
         return "HOLD"
     else:
         return "AVOID"
@@ -178,7 +177,7 @@ if run:
             "Score": score,
             "Recommendation": rec,
             "RSI": round(d["rsi"], 2),
-            "Momentum": round(d["momentum"] * 100, 2),
+            "Momentum %": round(d["momentum"] * 100, 2),
             "Sentiment": sentiment_label
         })
 
