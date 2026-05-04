@@ -21,7 +21,7 @@ tickers = [t.strip() for t in tickers_input.split(",")]
 run = st.button("Run Analysis")
 
 # -----------------------------
-# DATA FETCH (CACHED)
+# DATA FETCH (FIXED + SAFE)
 # -----------------------------
 @st.cache_data(show_spinner=False)
 def fetch_data(ticker):
@@ -29,12 +29,25 @@ def fetch_data(ticker):
         stock = yf.Ticker(ticker)
 
         hist = stock.history(period="1y")
-        info = stock.info
-        news = stock.news
-        fin = stock.financials
 
         if hist.empty:
             return None
+
+        # SAFE FALLBACKS
+        try:
+            info = stock.info
+        except:
+            info = {}
+
+        try:
+            news = stock.news
+        except:
+            news = []
+
+        try:
+            fin = stock.financials
+        except:
+            fin = pd.DataFrame()
 
         hist["200DMA"] = hist["Close"].rolling(200).mean()
         hist["RSI"] = RSIIndicator(hist["Close"], 14).rsi()
@@ -51,18 +64,17 @@ def fetch_data(ticker):
             "roe": info.get("returnOnEquity", None),
             "income": info.get("netIncomeToCommon", None),
             "hist": hist,
-            "news": news,
-            "financials": fin
+            "news": news if news else [],
+            "financials": fin if not fin.empty else pd.DataFrame()
         }
 
-    except:
+    except Exception as e:
         return None
 
 
 # -----------------------------
 # SCORING FUNCTIONS
 # -----------------------------
-
 def fundamental_score(d):
     score = 0
 
@@ -73,7 +85,7 @@ def fundamental_score(d):
     if d["roe"] and d["roe"] > 0.15:
         score += 10
 
-    return score  # out of 30
+    return score
 
 
 def technical_score(d):
@@ -84,7 +96,7 @@ def technical_score(d):
     if d["rsi"] and 40 <= d["rsi"] <= 65:
         score += 10
 
-    return score  # out of 20
+    return score
 
 
 def sentiment_score(news):
@@ -118,21 +130,19 @@ def earnings_score(fin):
 
         score = 0
 
-        # Trend check (last 3 periods)
         if len(revenue) >= 3 and revenue.iloc[0] > revenue.iloc[1] > revenue.iloc[2]:
             score += 10
 
         if len(profit) >= 3 and profit.iloc[0] > profit.iloc[1] > profit.iloc[2]:
             score += 10
 
-        return score  # out of 20
+        return score
 
     except:
         return 5
 
 
 def valuation_score(d):
-    # Placeholder (needs better data later)
     return 5
 
 
@@ -149,14 +159,13 @@ def risk_flags(d):
 
 
 def total_score(d):
-    f = fundamental_score(d)        # 30
-    t = technical_score(d)          # 20
-    s = sentiment_score(d["news"])  # 10
-    e = earnings_score(d["financials"])  # 20
-    v = valuation_score(d)          # 10
+    f = fundamental_score(d)
+    t = technical_score(d)
+    s = sentiment_score(d["news"])
+    e = earnings_score(d["financials"])
+    v = valuation_score(d)
 
-    total = f + t + s + e + v  # out of 100
-
+    total = f + t + s + e + v
     return total, f, t, s, e, v
 
 
@@ -172,11 +181,9 @@ def recommendation(score):
 
 
 # -----------------------------
-# THESIS GENERATOR
+# THESIS
 # -----------------------------
-
 def generate_thesis(d, score, rec, sentiment):
-
     return f"""
 ### 📌 {d['ticker']} — {rec} (Score: {score})
 
@@ -187,20 +194,19 @@ def generate_thesis(d, score, rec, sentiment):
 
 **Key Strengths:**
 - Positive earnings profile
-- Controlled leverage
+- Manageable leverage
 
 **Risks:**
 - Market volatility
-- Data limitations (yfinance)
+- Data limitations
 
 ---
 """
 
 
 # -----------------------------
-# MAIN RUN
+# MAIN
 # -----------------------------
-
 if run:
 
     results = []
@@ -208,9 +214,12 @@ if run:
 
     for ticker in tickers:
 
+        st.write(f"Fetching: {ticker}")  # DEBUG LINE
+
         d = fetch_data(ticker)
 
         if not d:
+            st.warning(f"No data for {ticker}")
             continue
 
         score, f, t, s, e, v = total_score(d)
@@ -239,9 +248,7 @@ if run:
         st.warning("No valid data found")
         st.stop()
 
-    # -----------------------------
-    # RANKING
-    # -----------------------------
+    # Ranking
     df["Rank"] = df["Score"].rank(pct=True)
 
     df["Conviction"] = df["Rank"].apply(
@@ -251,9 +258,7 @@ if run:
     st.subheader("📊 Screener Output")
     st.dataframe(df, use_container_width=True)
 
-    # -----------------------------
-    # PORTFOLIO
-    # -----------------------------
+    # Portfolio
     st.subheader("📈 Top Picks Portfolio")
 
     top = df.sort_values("Score", ascending=False).head(5)
@@ -261,9 +266,7 @@ if run:
 
     st.dataframe(top, use_container_width=True)
 
-    # -----------------------------
-    # DETAILS + THESIS
-    # -----------------------------
+    # Details
     for ticker in top["Ticker"]:
         d = data_store[ticker]
 
