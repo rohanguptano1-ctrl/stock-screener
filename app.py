@@ -5,77 +5,36 @@ import numpy as np
 from ta.momentum import RSIIndicator
 
 st.set_page_config(layout="wide")
-st.title("🚀 AI Equity Research Platform V6.2")
+st.title("🚀 AI Equity Research Platform V8")
 
 # -----------------------------
-# INPUT
+# MODE SELECTOR
 # -----------------------------
-tickers_input = st.text_input(
-    "Enter tickers",
-    "RELIANCE.NS,TCS.NS,INFY.NS,HDFCBANK.NS,ADANIPORTS.NS"
+mode = st.sidebar.radio(
+    "Select Mode",
+    ["Stock Analyzer", "Screener", "Backtest Lab"]
 )
 
-tickers = [t.strip() for t in tickers_input.split(",")]
-run = st.button("Run Analysis")
-
 # -----------------------------
-# DATA FETCH (SAFE CACHE)
+# COMMON FUNCTIONS
 # -----------------------------
 @st.cache_data
-def fetch_price_data(ticker):
+def fetch_data(ticker, period="1y"):
     try:
-        hist = yf.Ticker(ticker).history(period="1y")
-
+        hist = yf.Ticker(ticker).history(period=period)
         if hist.empty:
             return None
 
         hist["200DMA"] = hist["Close"].rolling(200).mean()
         hist["RSI"] = RSIIndicator(hist["Close"], 14).rsi()
-
         return hist
-
     except:
         return None
 
-# -----------------------------
-# NEWS (NO CACHE)
-# -----------------------------
-def fetch_news(ticker):
-    try:
-        stock = yf.Ticker(ticker)
-        news = stock.news
-
-        if not news:
-            return []
-
-        return news[:3]
-
-    except:
-        return []
-
-# -----------------------------
-# SENTIMENT
-# -----------------------------
-def get_sentiment(title):
-
-    title = title.lower()
-
-    if any(x in title for x in ["profit", "growth", "strong", "upgrade", "beat"]):
-        return "Positive"
-    elif any(x in title for x in ["loss", "fall", "weak", "downgrade", "miss"]):
-        return "Negative"
-    else:
-        return "Neutral"
-
-# -----------------------------
-# ANALYSIS
-# -----------------------------
-def analyze_stock(hist):
-
-    price = hist["Close"].dropna().iloc[-1]
-    dma = hist["200DMA"].dropna().iloc[-1]
-    rsi = hist["RSI"].dropna().iloc[-1]
-
+def analyze(hist):
+    price = hist["Close"].iloc[-1]
+    dma = hist["200DMA"].iloc[-1]
+    rsi = hist["RSI"].iloc[-1]
     momentum = price / hist["Close"].iloc[-60] - 1
 
     score = 0
@@ -83,9 +42,9 @@ def analyze_stock(hist):
     if price > dma:
         score += 30
 
-    if momentum > 0.20:
+    if momentum > 0.2:
         score += 40
-    elif momentum > 0.10:
+    elif momentum > 0.1:
         score += 25
     elif momentum > 0:
         score += 10
@@ -104,96 +63,145 @@ def analyze_stock(hist):
 
     return score, rec, price, rsi, momentum, dma
 
-# -----------------------------
-# THESIS
-# -----------------------------
-def generate_thesis(rec, price, dma, rsi, momentum):
-
-    thesis = []
-
-    thesis.append("Above 200 DMA (uptrend)" if price > dma else "Below 200 DMA (weak trend)")
+def thesis(rec, price, dma, rsi, momentum):
+    parts = []
+    parts.append("Uptrend" if price > dma else "Weak trend")
 
     if momentum > 0.15:
-        thesis.append("Strong momentum")
+        parts.append("Strong momentum")
     elif momentum > 0:
-        thesis.append("Moderate momentum")
+        parts.append("Moderate momentum")
     else:
-        thesis.append("Negative momentum")
+        parts.append("Negative momentum")
 
     if rsi > 70:
-        thesis.append("Overbought (risk of pullback)")
+        parts.append("Overbought")
     elif rsi > 50:
-        thesis.append("Healthy RSI zone")
+        parts.append("Healthy RSI")
     else:
-        thesis.append("Weak RSI")
+        parts.append("Weak RSI")
 
-    if rec == "BUY":
-        thesis.append("Bullish setup")
-    elif rec == "HOLD":
-        thesis.append("Mixed signals")
-    else:
-        thesis.append("Avoid for now")
+    parts.append(rec)
+    return " | ".join(parts)
 
-    return " | ".join(thesis)
+# =============================
+# 1️⃣ STOCK ANALYZER
+# =============================
+if mode == "Stock Analyzer":
 
-# -----------------------------
-# MAIN
-# -----------------------------
-if run:
+    ticker = st.text_input("Enter Ticker", "RELIANCE.NS")
 
-    results = []
+    if st.button("Analyze Stock"):
 
-    for ticker in tickers:
-
-        hist = fetch_price_data(ticker)
+        hist = fetch_data(ticker)
 
         if hist is None:
-            continue
+            st.error("No data")
+        else:
+            score, rec, price, rsi, momentum, dma = analyze(hist)
 
-        score, rec, price, rsi, momentum, dma = analyze_stock(hist)
+            st.subheader(f"📊 {ticker} Analysis")
 
-        thesis = generate_thesis(rec, price, dma, rsi, momentum)
+            col1, col2, col3 = st.columns(3)
 
-        news_items = fetch_news(ticker)
+            col1.metric("Price", round(price,2))
+            col2.metric("RSI", round(rsi,2))
+            col3.metric("Momentum %", round(momentum*100,2))
 
-        sentiments = []
+            st.write("### Recommendation:", rec)
+            st.write("### Thesis:", thesis(rec, price, dma, rsi, momentum))
 
-        for n in news_items:
-            title = n.get("title", "")
-            sentiments.append(get_sentiment(title))
+# =============================
+# 2️⃣ SCREENER
+# =============================
+elif mode == "Screener":
 
-        results.append({
-            "Ticker": ticker,
-            "Price": round(price, 2),
-            "Score": score,
-            "Recommendation": rec,
-            "RSI": round(rsi, 2),
-            "Momentum %": round(momentum*100, 2),
-            "Thesis": thesis,
-            "News Sentiment": ", ".join(sentiments)
-        })
+    tickers_input = st.text_input(
+        "Enter tickers",
+        "RELIANCE.NS,TCS.NS,INFY.NS,HDFCBANK.NS"
+    )
 
-    df = pd.DataFrame(results).sort_values(by="Score", ascending=False)
+    tickers = [t.strip() for t in tickers_input.split(",")]
 
-    st.subheader("🎯 Stock Recommendations")
-    st.dataframe(df, use_container_width=True)
+    if st.button("Run Screener"):
 
-    # -----------------------------
-    # NEWS DETAILS
-    # -----------------------------
-    st.subheader("📰 News Breakdown")
+        results = []
 
-    for ticker in tickers:
+        for t in tickers:
+            hist = fetch_data(t)
 
-        st.markdown(f"### {ticker}")
+            if hist is None:
+                continue
 
-        news_items = fetch_news(ticker)
+            score, rec, price, rsi, momentum, dma = analyze(hist)
 
-        if not news_items:
-            st.write("No recent news")
-            continue
+            results.append({
+                "Ticker": t,
+                "Price": round(price,2),
+                "Score": score,
+                "Recommendation": rec,
+                "RSI": round(rsi,2),
+                "Momentum %": round(momentum*100,2)
+            })
 
-        for n in news_items:
-            title = n.get("title", "No title available")
-            sentiment = get_sentiment(title)
-            st.write(f"- {title} ({sentiment})")
+        df = pd.DataFrame(results).sort_values(by="Score", ascending=False)
+
+        st.dataframe(df, use_container_width=True)
+
+# =============================
+# 3️⃣ BACKTEST LAB
+# =============================
+elif mode == "Backtest Lab":
+
+    tickers_input = st.text_input(
+        "Enter tickers",
+        "RELIANCE.NS,TCS.NS,INFY.NS,HDFCBANK.NS"
+    )
+
+    years = st.slider("Years", 1, 5, 2)
+
+    tickers = [t.strip() for t in tickers_input.split(",")]
+
+    if st.button("Run Backtest"):
+
+        data = {}
+
+        for t in tickers:
+            hist = fetch_data(t, f"{years}y")
+            if hist is not None:
+                data[t] = hist
+
+        dates = list(data[list(data.keys())[0]].index)
+
+        returns = []
+        step = 20
+
+        for i in range(200, len(dates)-step, step):
+
+            scores = {}
+
+            for t, hist in data.items():
+                if i >= len(hist):
+                    continue
+
+                s, _, _, _, _, _ = analyze(hist.iloc[:i])
+                scores[t] = s
+
+            selected = sorted(scores, key=scores.get, reverse=True)[:3]
+
+            period_ret = []
+
+            for t in selected:
+                hist = data[t]
+                if i+step < len(hist):
+                    r = hist["Close"].iloc[i+step]/hist["Close"].iloc[i]-1
+                    period_ret.append(r)
+
+            returns.append(np.mean(period_ret) if period_ret else 0)
+
+        strat = pd.Series(returns)
+        strat_cum = (1+strat).cumprod()
+
+        st.line_chart(strat_cum)
+
+        st.metric("Strategy Return", f"{round((strat_cum.iloc[-1]-1)*100,2)}%")
