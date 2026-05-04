@@ -5,16 +5,21 @@ import numpy as np
 
 st.set_page_config(layout="wide")
 
-st.title("🚀 AI Equity Research Platform V11.1 (Stable)")
+st.title("🚀 AI Equity Research Platform V11.2")
 
 # ==============================
-# INPUTS
+# SIDEBAR (NEW)
 # ==============================
 
-mode = st.radio("Select Mode", ["📊 Screener", "🔍 Single Stock", "📈 Backtest"])
+st.sidebar.title("Controls")
 
-tickers_input = st.text_input(
-    "Enter Tickers",
+mode = st.sidebar.radio(
+    "Select Mode",
+    ["📊 Screener", "🔍 Single Stock", "📈 Backtest"]
+)
+
+tickers_input = st.sidebar.text_input(
+    "Tickers",
     "RELIANCE.NS,TCS.NS,INFY.NS,HDFCBANK.NS"
 )
 
@@ -26,28 +31,36 @@ benchmark_map = {
     "Bank Nifty": "^NSEBANK"
 }
 
-benchmark_choice = st.selectbox("Benchmark", list(benchmark_map.keys()))
+benchmark_choice = st.sidebar.selectbox("Benchmark", list(benchmark_map.keys()))
 benchmark_symbol = benchmark_map[benchmark_choice]
 
-years = st.slider("Backtest Years", 1, 5, 3)
+years = st.sidebar.slider("Backtest Years", 1, 5, 3)
 
 # ==============================
-# DATA FETCH
+# DATA FETCH (HARD FIX)
 # ==============================
 
 @st.cache_data
 def fetch_data(ticker):
     try:
         df = yf.download(ticker, period="5y", progress=False)
+
         if df is None or df.empty:
             return None
-        df = df.dropna()
+
+        # FIX multi-index issue
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+
+        df = df[["Close"]].dropna()
+
         return df
+
     except:
         return None
 
 # ==============================
-# METRICS
+# METRICS (SAFE)
 # ==============================
 
 def compute_metrics(df, benchmark_df=None):
@@ -57,7 +70,8 @@ def compute_metrics(df, benchmark_df=None):
 
     df = df.copy()
 
-    df["Returns"] = df["Close"].pct_change()
+    df["SMA200"] = df["Close"].rolling(200).mean()
+    df["Mom20"] = df["Close"].pct_change(20) * 100
 
     # RSI
     delta = df["Close"].diff()
@@ -66,37 +80,34 @@ def compute_metrics(df, benchmark_df=None):
     rs = gain / loss
     df["RSI"] = 100 - (100 / (1 + rs))
 
-    # Moving averages
-    df["SMA50"] = df["Close"].rolling(50).mean()
-    df["SMA200"] = df["Close"].rolling(200).mean()
+    df = df.dropna()
 
-    # Momentum
-    df["Mom_20"] = df["Close"].pct_change(20) * 100
+    if len(df) == 0:
+        return None
 
     latest = df.iloc[-1]
 
-    # SAFE scalar extraction
     close = float(latest["Close"])
     sma200 = float(latest["SMA200"])
     rsi = float(latest["RSI"])
-    mom = float(latest["Mom_20"])
+    mom = float(latest["Mom20"])
 
     # Relative strength
-    rs_value = 0
+    rs_val = 0
     if benchmark_df is not None and len(benchmark_df) > 0:
-        aligned = df.join(benchmark_df["Close"], how="inner", rsuffix="_bench")
-        if len(aligned) > 0:
-            rel = (aligned["Close"] / aligned["Close"].iloc[0]) / (
-                aligned["Close_bench"] / aligned["Close_bench"].iloc[0]
+        merged = df.join(benchmark_df, how="inner", rsuffix="_bench")
+        if len(merged) > 0:
+            rel = (merged["Close"] / merged["Close"].iloc[0]) / (
+                merged["Close_bench"] / merged["Close_bench"].iloc[0]
             )
-            rs_value = float(rel.iloc[-1] * 100 - 100)
+            rs_val = float(rel.iloc[-1] * 100 - 100)
 
     return {
         "price": round(close, 2),
         "rsi": round(rsi, 2),
         "mom": round(mom, 2),
-        "above_200dma": bool(close > sma200),
-        "rs": round(rs_value, 2)
+        "above_200dma": close > sma200,
+        "rs": round(rs_val, 2)
     }
 
 # ==============================
@@ -150,13 +161,15 @@ def score_stock(m):
     return score, rec, " | ".join(thesis)
 
 # ==============================
-# MARKET FILTER
+# MARKET FILTER (FIXED)
 # ==============================
 
-def get_market_series(benchmark_df):
-    df = benchmark_df.copy()
+def get_market_series(df):
+    df = df.copy()
     df["SMA200"] = df["Close"].rolling(200).mean()
-    return (df["Close"] > df["SMA200"]).astype(int)
+    df = df.dropna()
+    signal = (df["Close"] > df["SMA200"]).astype(int)
+    return signal
 
 # ==============================
 # SCREENER
@@ -168,7 +181,8 @@ if mode == "📊 Screener":
 
         benchmark_df = fetch_data(benchmark_symbol)
         market_series = get_market_series(benchmark_df)
-        market_ok = bool(market_series.iloc[-1])
+
+        market_ok = int(market_series.iloc[-1])
 
         rows = []
 
@@ -181,7 +195,7 @@ if mode == "📊 Screener":
 
             score, rec, thesis = score_stock(m)
 
-            if not market_ok:
+            if market_ok == 0:
                 rec = "AVOID (Market Weak)"
 
             rows.append({
@@ -195,10 +209,9 @@ if mode == "📊 Screener":
                 "Thesis": thesis
             })
 
-        df_out = pd.DataFrame(rows)
-
-        if not df_out.empty:
-            st.dataframe(df_out.sort_values(by="Score", ascending=False))
+        if rows:
+            df_out = pd.DataFrame(rows).sort_values("Score", ascending=False)
+            st.dataframe(df_out, use_container_width=True)
         else:
             st.warning("No valid stocks")
 
@@ -210,8 +223,7 @@ elif mode == "🔍 Single Stock":
 
     if st.button("Analyze Stock"):
 
-        ticker = tickers[0]
-        df = fetch_data(ticker)
+        df = fetch_data(tickers[0])
         benchmark_df = fetch_data(benchmark_symbol)
 
         m = compute_metrics(df, benchmark_df)
@@ -231,7 +243,7 @@ elif mode == "🔍 Single Stock":
             st.write(thesis)
 
 # ==============================
-# BACKTEST
+# BACKTEST (STABLE)
 # ==============================
 
 elif mode == "📈 Backtest":
@@ -245,7 +257,7 @@ elif mode == "📈 Backtest":
 
         portfolio = []
 
-        for date in benchmark_df.index:
+        for date in market_series.index:
 
             if market_series.loc[date] == 0:
                 portfolio.append(0)
@@ -259,7 +271,7 @@ elif mode == "📈 Backtest":
                 if df is None or date not in df.index:
                     continue
 
-                sub_df = df[df.index <= date]
+                sub_df = df.loc[:date]
 
                 m = compute_metrics(sub_df, benchmark_df)
 
@@ -274,12 +286,12 @@ elif mode == "📈 Backtest":
 
             portfolio.append(1 if buy_flag else 0)
 
-        portfolio = pd.Series(portfolio, index=benchmark_df.index)
+        portfolio = pd.Series(portfolio, index=market_series.index)
 
-        strategy_returns = portfolio.shift(1) * benchmark_df["Returns"]
+        strategy_returns = portfolio.shift(1) * benchmark_df.loc[portfolio.index, "Returns"]
 
         strategy_curve = (1 + strategy_returns.fillna(0)).cumprod()
-        benchmark_curve = (1 + benchmark_df["Returns"].fillna(0)).cumprod()
+        benchmark_curve = (1 + benchmark_df.loc[portfolio.index, "Returns"].fillna(0)).cumprod()
 
         st.subheader("Strategy vs Benchmark")
 
