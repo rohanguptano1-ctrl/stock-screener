@@ -5,7 +5,7 @@ import numpy as np
 from ta.momentum import RSIIndicator
 
 st.set_page_config(layout="wide")
-st.title("🚀 AI Equity Research Platform V6 (Decision Engine)")
+st.title("🚀 AI Equity Research Platform V6.1")
 
 # -----------------------------
 # INPUT
@@ -19,13 +19,12 @@ tickers = [t.strip() for t in tickers_input.split(",")]
 run = st.button("Run Analysis")
 
 # -----------------------------
-# DATA FETCH
+# DATA FETCH (CACHE SAFE)
 # -----------------------------
 @st.cache_data
-def fetch_data(ticker):
+def fetch_price_data(ticker):
     try:
-        stock = yf.Ticker(ticker)
-        hist = stock.history(period="1y")
+        hist = yf.Ticker(ticker).history(period="1y")
 
         if hist.empty:
             return None
@@ -33,12 +32,23 @@ def fetch_data(ticker):
         hist["200DMA"] = hist["Close"].rolling(200).mean()
         hist["RSI"] = RSIIndicator(hist["Close"], 14).rsi()
 
-        return hist, stock
+        return hist
+
     except:
-        return None, None
+        return None
 
 # -----------------------------
-# SCORING + RECOMMENDATION
+# NEWS (NO CACHE)
+# -----------------------------
+def fetch_news(ticker):
+    try:
+        stock = yf.Ticker(ticker)
+        return stock.news[:3]
+    except:
+        return []
+
+# -----------------------------
+# ANALYSIS
 # -----------------------------
 def analyze_stock(hist):
 
@@ -65,7 +75,6 @@ def analyze_stock(hist):
     elif rsi > 75:
         score += 10
 
-    # Recommendation
     if score >= 70:
         rec = "BUY"
     elif score >= 50:
@@ -76,64 +85,50 @@ def analyze_stock(hist):
     return score, rec, price, rsi, momentum, dma
 
 # -----------------------------
-# THESIS GENERATOR
+# THESIS
 # -----------------------------
 def generate_thesis(rec, price, dma, rsi, momentum):
 
     thesis = []
 
-    if price > dma:
-        thesis.append("Strong uptrend (above 200 DMA)")
-    else:
-        thesis.append("Below long-term trend")
+    thesis.append("Above 200 DMA" if price > dma else "Below 200 DMA")
 
     if momentum > 0.15:
-        thesis.append("High price momentum")
+        thesis.append("Strong momentum")
     elif momentum > 0:
         thesis.append("Moderate momentum")
     else:
-        thesis.append("Weak/negative momentum")
-
-    if rsi > 70:
-        thesis.append("Overbought zone (risk of pullback)")
-    elif rsi > 50:
-        thesis.append("Healthy momentum zone")
-    else:
         thesis.append("Weak momentum")
 
-    if rec == "BUY":
-        thesis.append("Trend + momentum aligned → bullish setup")
-    elif rec == "HOLD":
-        thesis.append("Mixed signals → wait for confirmation")
+    if rsi > 70:
+        thesis.append("Overbought risk")
+    elif rsi > 50:
+        thesis.append("Healthy RSI")
     else:
-        thesis.append("Weak setup → avoid")
+        thesis.append("Weak RSI")
+
+    if rec == "BUY":
+        thesis.append("Bullish setup")
+    elif rec == "HOLD":
+        thesis.append("Wait for confirmation")
+    else:
+        thesis.append("Avoid for now")
 
     return " | ".join(thesis)
 
 # -----------------------------
 # NEWS SENTIMENT
 # -----------------------------
-def get_news_sentiment(stock):
+def get_sentiment(title):
 
-    try:
-        news = stock.news[:3]
+    title = title.lower()
 
-        sentiments = []
-
-        for item in news:
-            title = item["title"].lower()
-
-            if any(word in title for word in ["growth", "profit", "upgrade", "strong"]):
-                sentiments.append("Positive")
-            elif any(word in title for word in ["fall", "loss", "downgrade", "weak"]):
-                sentiments.append("Negative")
-            else:
-                sentiments.append("Neutral")
-
-        return sentiments, news
-
-    except:
-        return [], []
+    if any(x in title for x in ["profit", "growth", "strong", "upgrade"]):
+        return "Positive"
+    elif any(x in title for x in ["loss", "fall", "weak", "downgrade"]):
+        return "Negative"
+    else:
+        return "Neutral"
 
 # -----------------------------
 # MAIN
@@ -144,7 +139,7 @@ if run:
 
     for ticker in tickers:
 
-        hist, stock = fetch_data(ticker)
+        hist = fetch_price_data(ticker)
 
         if hist is None:
             continue
@@ -153,7 +148,9 @@ if run:
 
         thesis = generate_thesis(rec, price, dma, rsi, momentum)
 
-        sentiments, news = get_news_sentiment(stock)
+        news = fetch_news(ticker)
+
+        sentiments = [get_sentiment(n["title"]) for n in news]
 
         results.append({
             "Ticker": ticker,
@@ -172,20 +169,16 @@ if run:
     st.dataframe(df, use_container_width=True)
 
     # -----------------------------
-    # Detailed View
+    # DETAILS
     # -----------------------------
-    st.subheader("📰 News + Thesis Details")
+    st.subheader("📰 News + Details")
 
     for ticker in tickers:
 
-        hist, stock = fetch_data(ticker)
-
-        if hist is None:
-            continue
+        news = fetch_news(ticker)
 
         st.markdown(f"### {ticker}")
 
-        sentiments, news = get_news_sentiment(stock)
-
-        for i, item in enumerate(news[:3]):
-            st.write(f"- {item['title']} ({sentiments[i]})")
+        for n in news:
+            sentiment = get_sentiment(n["title"])
+            st.write(f"- {n['title']} ({sentiment})")
