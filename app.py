@@ -5,26 +5,27 @@ import numpy as np
 from ta.momentum import RSIIndicator
 
 st.set_page_config(layout="wide")
-st.title("🧠 AI Equity Research Platform V4.2")
+st.title("🧠 AI Equity Research Platform V5 (Rebalancing Engine)")
 
 # -----------------------------
 # INPUT
 # -----------------------------
 tickers_input = st.text_input(
     "Enter tickers",
-    "SUZLON.NS,IRCON.NS,NBCC.NS,HFCL.NS,IDFCFIRSTB.NS"
+    "LT.NS,ASIANPAINT.NS,BAJFINANCE.NS,TATAMOTORS.NS,ADANIPORTS.NS,HINDUNILVR.NS,COALINDIA.NS,SBIN.NS,ULTRACEMCO.NS,PIDILITIND.NS"
 )
 
-years = st.slider("Backtest Period (Years)", 1, 5, 1)
+years = st.slider("Backtest Period (Years)", 1, 5, 2)
+top_n = st.slider("Number of Stocks in Portfolio", 2, 6, 3)
 
 tickers = [t.strip() for t in tickers_input.split(",")]
-run = st.button("Run Analysis + Backtest")
+run = st.button("Run Strategy")
 
 # -----------------------------
 # DATA FETCH
 # -----------------------------
 @st.cache_data
-def fetch_data(ticker, period="1y"):
+def fetch_full_data(ticker, period):
     try:
         stock = yf.Ticker(ticker)
         hist = stock.history(period=period)
@@ -42,27 +43,24 @@ def fetch_data(ticker, period="1y"):
 
 
 # -----------------------------
-# SCORING
+# SCORE FUNCTION
 # -----------------------------
-def compute_score(hist):
+def compute_score_row(hist, i):
 
-    close = hist["Close"].dropna()
-    if len(close) < 60:
+    if i < 200:
         return None
 
-    price = float(close.iloc[-1])
-    rsi = hist["RSI"].dropna().iloc[-1]
-    dma = hist["200DMA"].dropna().iloc[-1]
+    price = hist["Close"].iloc[i]
+    dma = hist["200DMA"].iloc[i]
+    rsi = hist["RSI"].iloc[i]
 
-    momentum = price / close.iloc[-60] - 1
+    momentum = price / hist["Close"].iloc[i-60] - 1
 
     score = 5
 
-    # Trend
     if price > dma:
         score += 20
 
-    # RSI logic (trend-friendly)
     if 55 <= rsi <= 75:
         score += 20
     elif 45 <= rsi < 55:
@@ -70,22 +68,12 @@ def compute_score(hist):
     elif rsi > 75:
         score += 5
 
-    # Momentum
     if momentum > 0.15:
         score += 20
     elif momentum > 0:
         score += 10
 
-    return score, price, rsi, momentum
-
-
-def recommendation(score):
-    if score >= 65:
-        return "BUY"
-    elif score >= 45:
-        return "HOLD"
-    else:
-        return "AVOID"
+    return score
 
 
 # -----------------------------
@@ -93,83 +81,84 @@ def recommendation(score):
 # -----------------------------
 if run:
 
-    results = {}
-    full_data = {}
+    st.subheader("📊 Running Monthly Rebalancing Backtest...")
+
+    data = {}
 
     for ticker in tickers:
-        hist = fetch_data(ticker, "1y")
+        hist = fetch_full_data(ticker, f"{years}y")
+        if hist is not None:
+            data[ticker] = hist
 
-        if hist is None:
-            continue
-
-        res = compute_score(hist)
-        if res is None:
-            continue
-
-        score, price, rsi, momentum = res
-
-        results[ticker] = {
-            "Price": round(price, 2),
-            "Score": score,
-            "RSI": round(rsi, 2),
-            "Momentum %": round(momentum * 100, 2),
-            "Recommendation": recommendation(score)
-        }
-
-        full_data[ticker] = hist
-
-    df = pd.DataFrame(results).T
-
-    if df.empty:
-        st.warning("No valid data")
+    if len(data) == 0:
+        st.warning("No data available")
         st.stop()
 
-    df["Rank"] = df["Score"].rank(pct=True)
+    # Align dates
+    dates = list(data[list(data.keys())[0]].index)
 
-    st.subheader("📊 Screener Output")
-    st.dataframe(df, use_container_width=True)
+    portfolio_returns = []
 
-    # -----------------------------
-    # BACKTEST (BUY + HOLD)
-    # -----------------------------
-    st.subheader("📈 Backtest Results (BUY + HOLD)")
+    for i in range(200, len(dates)-1, 21):  # monthly steps (~21 trading days)
 
-    selected = df[df["Recommendation"].isin(["BUY", "HOLD"])].index
+        scores = {}
 
-    returns_list = []
+        for ticker, hist in data.items():
+            if i >= len(hist):
+                continue
 
-    for ticker in selected:
-        hist = fetch_data(ticker, f"{years}y")
+            score = compute_score_row(hist, i)
 
-        if hist is None:
+            if score is not None:
+                scores[ticker] = score
+
+        if len(scores) == 0:
             continue
 
-        hist["Return"] = hist["Close"].pct_change()
-        returns_list.append(hist["Return"])
+        # Pick top N
+        selected = sorted(scores, key=scores.get, reverse=True)[:top_n]
 
-    if len(returns_list) == 0:
-        st.warning("No eligible stocks for backtest")
-    else:
-        combined = pd.concat(returns_list, axis=1)
+        # Compute next month return
+        period_returns = []
 
-        combined["Portfolio"] = combined.mean(axis=1)
-        combined["Cumulative"] = (1 + combined["Portfolio"]).cumprod()
+        for ticker in selected:
+            hist = data[ticker]
 
-        # Benchmark (Nifty)
-        nifty = yf.Ticker("^NSEI").history(period=f"{years}y")
-        nifty["Return"] = nifty["Close"].pct_change()
-        nifty["Cumulative"] = (1 + nifty["Return"]).cumprod()
+            if i+21 < len(hist):
+                ret = hist["Close"].iloc[i+21] / hist["Close"].iloc[i] - 1
+                period_returns.append(ret)
 
-        chart_df = pd.DataFrame({
-            "Strategy": combined["Cumulative"],
-            "Nifty": nifty["Cumulative"]
-        }).dropna()
+        if len(period_returns) > 0:
+            portfolio_returns.append(np.mean(period_returns))
 
-        st.line_chart(chart_df)
+    if len(portfolio_returns) == 0:
+        st.warning("No backtest results")
+        st.stop()
 
-        strategy_return = combined["Cumulative"].iloc[-1] - 1
-        nifty_return = nifty["Cumulative"].iloc[-1] - 1
+    # Convert to cumulative
+    portfolio_series = pd.Series(portfolio_returns)
+    cumulative = (1 + portfolio_series).cumprod()
 
-        col1, col2 = st.columns(2)
-        col1.metric("Strategy Return", f"{round(strategy_return*100,2)}%")
-        col2.metric("Nifty Return", f"{round(nifty_return*100,2)}%")
+    # Benchmark
+    nifty = yf.Ticker("^NSEI").history(period=f"{years}y")
+    nifty["Return"] = nifty["Close"].pct_change()
+    nifty["Cumulative"] = (1 + nifty["Return"]).cumprod()
+
+    # Align lengths
+    min_len = min(len(cumulative), len(nifty))
+    cumulative = cumulative.iloc[:min_len]
+    nifty = nifty.iloc[:min_len]
+
+    st.subheader("📈 Strategy vs Nifty")
+
+    st.line_chart(pd.DataFrame({
+        "Strategy": cumulative.values,
+        "Nifty": nifty["Cumulative"].values
+    }))
+
+    strategy_return = cumulative.iloc[-1] - 1
+    nifty_return = nifty["Cumulative"].iloc[-1] - 1
+
+    col1, col2 = st.columns(2)
+    col1.metric("Strategy Return", f"{round(strategy_return*100,2)}%")
+    col2.metric("Nifty Return", f"{round(nifty_return*100,2)}%")
