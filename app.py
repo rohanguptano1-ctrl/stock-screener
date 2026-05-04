@@ -5,7 +5,7 @@ import numpy as np
 from ta.momentum import RSIIndicator
 
 st.set_page_config(layout="wide")
-st.title("🚀 AI Equity Research Platform V9")
+st.title("🚀 AI Equity Research Platform V9.1")
 
 # -----------------------------
 # MODE
@@ -16,7 +16,7 @@ mode = st.sidebar.radio(
 )
 
 # -----------------------------
-# BENCHMARK MAP
+# BENCHMARK
 # -----------------------------
 def get_benchmark(choice):
     return {
@@ -26,7 +26,7 @@ def get_benchmark(choice):
     }[choice]
 
 # -----------------------------
-# SAFE DATA FETCH
+# FETCH DATA (FIXED)
 # -----------------------------
 @st.cache_data
 def fetch_data(ticker, period="1y"):
@@ -36,10 +36,7 @@ def fetch_data(ticker, period="1y"):
         if hist is None or hist.empty:
             return None
 
-        hist = hist.dropna()
-
-        if len(hist) < 100:
-            return None
+        hist = hist.copy()
 
         hist["200DMA"] = hist["Close"].rolling(200).mean()
         hist["RSI"] = RSIIndicator(hist["Close"], 14).rsi()
@@ -50,7 +47,7 @@ def fetch_data(ticker, period="1y"):
         return None
 
 # -----------------------------
-# SAFE ANALYSIS
+# SAFE ANALYSIS (FIXED)
 # -----------------------------
 def analyze(hist):
 
@@ -115,12 +112,12 @@ if mode == "Stock Analyzer":
         hist = fetch_data(ticker)
 
         if hist is None:
-            st.error("No valid data")
+            st.error("No data")
         else:
             res = analyze(hist)
 
             if res is None:
-                st.error("Not enough data")
+                st.error("Not enough valid data (need ~60 clean days)")
             else:
                 score, rec, price, rsi, momentum, dma = res
 
@@ -172,9 +169,11 @@ elif mode == "Screener":
                 "Momentum %": round(momentum*100,2)
             })
 
-        df = pd.DataFrame(rows).sort_values(by="Score", ascending=False)
-
-        st.dataframe(df, use_container_width=True)
+        if len(rows) == 0:
+            st.warning("No valid stocks found")
+        else:
+            df = pd.DataFrame(rows).sort_values(by="Score", ascending=False)
+            st.dataframe(df, use_container_width=True)
 
 # =============================
 # 3️⃣ BACKTEST LAB
