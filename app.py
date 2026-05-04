@@ -21,7 +21,7 @@ tickers = [t.strip() for t in tickers_input.split(",")]
 run = st.button("Run Analysis")
 
 # -----------------------------
-# DATA FETCH (FIXED + SAFE)
+# DATA FETCH (SAFE VERSION)
 # -----------------------------
 @st.cache_data(show_spinner=False)
 def fetch_data(ticker):
@@ -54,21 +54,24 @@ def fetch_data(ticker):
 
         latest = hist.iloc[-1]
 
+        price = float(latest["Close"]) if not pd.isna(latest["Close"]) else None
+
         return {
             "ticker": ticker,
-            "price": latest["Close"],
+            "price": price,
             "rsi": latest["RSI"],
             "above_200dma": latest["Close"] > latest["200DMA"],
             "marketCap": info.get("marketCap", 0),
             "debt": info.get("debtToEquity", None),
             "roe": info.get("returnOnEquity", None),
-            "income": info.get("netIncomeToCommon", None),
+            # fallback income so it doesn't default to negative
+            "income": info.get("netIncomeToCommon") if info.get("netIncomeToCommon") else 1,
             "hist": hist,
             "news": news if news else [],
             "financials": fin if not fin.empty else pd.DataFrame()
         }
 
-    except Exception as e:
+    except:
         return None
 
 
@@ -78,11 +81,13 @@ def fetch_data(ticker):
 def fundamental_score(d):
     score = 0
 
-    if d["income"] and d["income"] > 0:
+    if d["income"] is not None and d["income"] > 0:
         score += 10
+
     if d["debt"] is not None and d["debt"] < 0.5:
         score += 10
-    if d["roe"] and d["roe"] > 0.15:
+
+    if d["roe"] is not None and d["roe"] > 0.15:
         score += 10
 
     return score
@@ -93,7 +98,8 @@ def technical_score(d):
 
     if d["above_200dma"]:
         score += 10
-    if d["rsi"] and 40 <= d["rsi"] <= 65:
+
+    if d["rsi"] is not None and 40 <= d["rsi"] <= 65:
         score += 10
 
     return score
@@ -149,11 +155,13 @@ def valuation_score(d):
 def risk_flags(d):
     flags = []
 
-    if d["debt"] and d["debt"] > 1:
-        flags.append("High Debt")
+    if d["income"] is not None:
+        if d["income"] < 0:
+            flags.append("Negative Earnings")
 
-    if not d["income"] or d["income"] < 0:
-        flags.append("Negative Earnings")
+    if d["debt"] is not None:
+        if d["debt"] > 1:
+            flags.append("High Debt")
 
     return flags
 
@@ -166,7 +174,7 @@ def total_score(d):
     v = valuation_score(d)
 
     total = f + t + s + e + v
-    return total, f, t, s, e, v
+    return total
 
 
 def recommendation(score):
@@ -214,7 +222,7 @@ if run:
 
     for ticker in tickers:
 
-        st.write(f"Fetching: {ticker}")  # DEBUG LINE
+        st.write(f"Fetching: {ticker}")
 
         d = fetch_data(ticker)
 
@@ -222,17 +230,18 @@ if run:
             st.warning(f"No data for {ticker}")
             continue
 
-        score, f, t, s, e, v = total_score(d)
+        score = total_score(d)
         rec = recommendation(score)
         flags = risk_flags(d)
 
+        sentiment = sentiment_score(d["news"])
         sentiment_label = (
-            "POSITIVE" if s == 10 else "NEGATIVE" if s == 0 else "NEUTRAL"
+            "POSITIVE" if sentiment == 10 else "NEGATIVE" if sentiment == 0 else "NEUTRAL"
         )
 
         results.append({
             "Ticker": ticker,
-            "Price": round(d["price"], 2),
+            "Price": d["price"],
             "Score": score,
             "Recommendation": rec,
             "RSI": round(d["rsi"], 2),
