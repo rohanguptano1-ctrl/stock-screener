@@ -5,7 +5,7 @@ import numpy as np
 from ta.momentum import RSIIndicator
 
 st.set_page_config(layout="wide")
-st.title("🚀 AI Equity Research Platform V5.1 (Aggressive Momentum)")
+st.title("🚀 AI Equity Research Platform V5.3")
 
 # -----------------------------
 # INPUT
@@ -18,8 +18,27 @@ tickers_input = st.text_input(
 years = st.slider("Backtest Period (Years)", 1, 5, 2)
 top_n = st.slider("Portfolio Size", 2, 6, 4)
 
+benchmark_choice = st.selectbox(
+    "Select Benchmark",
+    ["Nifty 50", "Sensex", "Bank Nifty", "Nifty Midcap", "Nifty Smallcap"]
+)
+
 tickers = [t.strip() for t in tickers_input.split(",")]
 run = st.button("Run Strategy")
+
+# -----------------------------
+# BENCHMARK MAPPING
+# -----------------------------
+def get_benchmark_ticker(choice):
+    mapping = {
+        "Nifty 50": "^NSEI",
+        "Sensex": "^BSESN",
+        "Bank Nifty": "^NSEBANK",
+        "Nifty Midcap": "^NSEMDCP50",
+        "Nifty Smallcap": "^NSEMDCP50"  # proxy
+    }
+    return mapping.get(choice, "^NSEI")
+
 
 # -----------------------------
 # DATA FETCH
@@ -56,13 +75,13 @@ def compute_score_row(hist, i):
 
     momentum = price / hist["Close"].iloc[i-60] - 1
 
-    # HARD FILTER (IMPORTANT)
+    # HARD FILTER
     if price < dma or momentum <= 0:
         return None
 
     score = 0
 
-    # Strong trend
+    # Trend base
     score += 30
 
     # Momentum heavy weight
@@ -104,8 +123,7 @@ if run:
 
     portfolio_returns = []
 
-    # 🔥 Faster rebalancing (15 days)
-    step = 15
+    step = 15  # rebalancing window
 
     for i in range(200, len(dates)-step, step):
 
@@ -124,7 +142,6 @@ if run:
             portfolio_returns.append(0)
             continue
 
-        # Pick top N
         selected = sorted(scores, key=scores.get, reverse=True)[:top_n]
 
         period_returns = []
@@ -141,29 +158,46 @@ if run:
         else:
             portfolio_returns.append(0)
 
-    # Convert to cumulative
+    if len(portfolio_returns) == 0:
+        st.warning("No backtest results")
+        st.stop()
+
+    # Strategy cumulative
     portfolio_series = pd.Series(portfolio_returns)
     cumulative = (1 + portfolio_series).cumprod()
 
-    # Benchmark
-    nifty = yf.Ticker("^NSEI").history(period=f"{years}y")
-    nifty["Return"] = nifty["Close"].pct_change()
-    nifty["Cumulative"] = (1 + nifty["Return"]).cumprod()
+    # -----------------------------
+    # BENCHMARK (ALIGNED FREQUENCY)
+    # -----------------------------
+    benchmark_ticker = get_benchmark_ticker(benchmark_choice)
 
-    min_len = min(len(cumulative), len(nifty))
-    cumulative = cumulative.iloc[:min_len]
-    nifty = nifty.iloc[:min_len]
+    benchmark = yf.Ticker(benchmark_ticker).history(period=f"{years}y")
 
-    st.subheader("📈 Strategy vs Nifty")
+    benchmark_returns = []
+
+    for i in range(0, len(benchmark)-step, step):
+        ret = benchmark["Close"].iloc[i+step] / benchmark["Close"].iloc[i] - 1
+        benchmark_returns.append(ret)
+
+    benchmark_series = pd.Series(benchmark_returns)
+    benchmark_cum = (1 + benchmark_series).cumprod()
+
+    # Align lengths
+    min_len = min(len(cumulative), len(benchmark_cum))
+
+    # -----------------------------
+    # OUTPUT
+    # -----------------------------
+    st.subheader("📈 Strategy vs Benchmark")
 
     st.line_chart(pd.DataFrame({
-        "Strategy": cumulative.values,
-        "Nifty": nifty["Cumulative"].values
+        "Strategy": cumulative.iloc[:min_len].values,
+        benchmark_choice: benchmark_cum.iloc[:min_len].values
     }))
 
     strategy_return = cumulative.iloc[-1] - 1
-    nifty_return = nifty["Cumulative"].iloc[-1] - 1
+    benchmark_return = benchmark_cum.iloc[-1] - 1
 
     col1, col2 = st.columns(2)
     col1.metric("Strategy Return", f"{round(strategy_return*100,2)}%")
-    col2.metric("Nifty Return", f"{round(nifty_return*100,2)}%")
+    col2.metric(f"{benchmark_choice} Return", f"{round(benchmark_return*100,2)}%")
