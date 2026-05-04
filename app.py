@@ -6,7 +6,7 @@ from ta.momentum import RSIIndicator
 from textblob import TextBlob
 
 st.set_page_config(layout="wide")
-st.title("🧠 AI Equity Research Platform V3.1")
+st.title("🧠 AI Equity Research Platform V3.2")
 
 # -----------------------------
 # INPUT
@@ -29,6 +29,7 @@ def fetch_data(ticker):
         stock = yf.Ticker(ticker)
 
         hist = stock.history(period="1y")
+
         if hist.empty:
             return None
 
@@ -41,14 +42,11 @@ def fetch_data(ticker):
         # TECHNICALS
         hist["200DMA"] = hist["Close"].rolling(200).mean()
         hist["RSI"] = RSIIndicator(hist["Close"], 14).rsi()
+
         latest_rsi = hist["RSI"].dropna().iloc[-1]
+        latest_dma = hist["200DMA"].dropna().iloc[-1]
 
-        # FUNDAMENTALS
-        try:
-            fin = stock.financials
-        except:
-            fin = pd.DataFrame()
-
+        # FUNDAMENTALS (LIGHTWEIGHT)
         try:
             info = stock.info
         except:
@@ -63,10 +61,10 @@ def fetch_data(ticker):
             "ticker": ticker,
             "price": price,
             "rsi": latest_rsi,
-            "above_200dma": price > hist["200DMA"].iloc[-1],
+            "above_200dma": price > latest_dma,
             "debt": info.get("debtToEquity", None),
             "roe": info.get("returnOnEquity", None),
-            "financials": fin,
+            "profit": info.get("netIncomeToCommon", None),
             "news": news if news else [],
             "hist": hist
         }
@@ -76,57 +74,49 @@ def fetch_data(ticker):
 
 
 # -----------------------------
-# FUNDAMENTAL SCORE (NEW)
+# FUNDAMENTAL SCORE (SIMPLIFIED)
 # -----------------------------
 def fundamental_score(d):
     score = 0
 
-    fin = d["financials"]
-
-    try:
-        if not fin.empty:
-            revenue = fin.loc["Total Revenue"]
-            profit = fin.loc["Net Income"]
-
-            # Revenue growth
-            if len(revenue) >= 3 and revenue.iloc[0] > revenue.iloc[1] > revenue.iloc[2]:
-                score += 15
-
-            # Profit growth
-            if len(profit) >= 3 and profit.iloc[0] > profit.iloc[1] > profit.iloc[2]:
-                score += 15
-
-    except:
-        pass
+    # Profitability
+    if d["profit"] is not None and d["profit"] > 0:
+        score += 15
 
     # ROE
-    if d["roe"] is not None and d["roe"] > 0.15:
+    if d["roe"] is not None and d["roe"] > 0.12:
         score += 10
 
-    # Debt
-    if d["debt"] is not None and d["debt"] < 0.5:
+    # Debt sanity
+    if d["debt"] is not None and d["debt"] < 1:
         score += 10
 
-    return score  # max ~50
+    return score  # max 35
 
 
 # -----------------------------
-# TECHNICAL SCORE
+# TECHNICAL SCORE (STRONGER)
 # -----------------------------
 def technical_score(d):
     score = 0
 
+    # Trend
     if d["above_200dma"]:
-        score += 10
+        score += 15
 
-    if d["rsi"] is not None and 40 <= d["rsi"] <= 65:
-        score += 10
+    # Momentum sweet spot
+    if d["rsi"] is not None and 45 <= d["rsi"] <= 65:
+        score += 15
 
-    return score  # max 20
+    # Avoid overbought
+    elif d["rsi"] is not None and d["rsi"] > 70:
+        score -= 5
+
+    return score  # max ~30
 
 
 # -----------------------------
-# SENTIMENT
+# SENTIMENT (LIGHTWEIGHT)
 # -----------------------------
 def sentiment_score(news):
     scores = []
@@ -137,7 +127,7 @@ def sentiment_score(news):
         scores.append(blob.sentiment.polarity)
 
     if not scores:
-        return 3  # slight neutral-negative bias
+        return 3
 
     avg = np.mean(scores)
 
@@ -153,18 +143,17 @@ def sentiment_score(news):
 # TOTAL SCORE
 # -----------------------------
 def total_score(d):
-    f = fundamental_score(d)   # 50
-    t = technical_score(d)     # 20
+    f = fundamental_score(d)   # 35
+    t = technical_score(d)     # 30
     s = sentiment_score(d["news"])  # 10
 
-    total = f + t + s
-    return total
+    return f + t + s
 
 
 def recommendation(score):
-    if score >= 60:
+    if score >= 55:
         return "BUY"
-    elif score >= 45:
+    elif score >= 40:
         return "HOLD"
     else:
         return "AVOID"
@@ -213,7 +202,12 @@ if run:
         st.warning("No valid data found")
         st.stop()
 
+    # Ranking
     df["Rank"] = df["Score"].rank(pct=True)
+
+    df["Conviction"] = df["Rank"].apply(
+        lambda x: "HIGH" if x > 0.8 else "MEDIUM" if x > 0.5 else "LOW"
+    )
 
     st.subheader("📊 Screener Output")
     st.dataframe(df, use_container_width=True)
