@@ -21,7 +21,7 @@ tickers = [t.strip() for t in tickers_input.split(",")]
 run = st.button("Run Analysis")
 
 # -----------------------------
-# DATA FETCH (SAFE VERSION)
+# DATA FETCH (ROBUST VERSION)
 # -----------------------------
 @st.cache_data(show_spinner=False)
 def fetch_data(ticker):
@@ -32,6 +32,13 @@ def fetch_data(ticker):
 
         if hist.empty:
             return None
+
+        # 🔥 FIX: Get last VALID close price
+        valid_close = hist["Close"].dropna()
+        if valid_close.empty:
+            return None
+
+        price = float(valid_close.iloc[-1])
 
         # SAFE FALLBACKS
         try:
@@ -52,19 +59,16 @@ def fetch_data(ticker):
         hist["200DMA"] = hist["Close"].rolling(200).mean()
         hist["RSI"] = RSIIndicator(hist["Close"], 14).rsi()
 
-        latest = hist.iloc[-1]
-
-        price = float(latest["Close"]) if not pd.isna(latest["Close"]) else None
+        latest_rsi = hist["RSI"].dropna().iloc[-1]
 
         return {
             "ticker": ticker,
             "price": price,
-            "rsi": latest["RSI"],
-            "above_200dma": latest["Close"] > latest["200DMA"],
+            "rsi": latest_rsi,
+            "above_200dma": price > hist["200DMA"].iloc[-1],
             "marketCap": info.get("marketCap", 0),
             "debt": info.get("debtToEquity", None),
             "roe": info.get("returnOnEquity", None),
-            # fallback income so it doesn't default to negative
             "income": info.get("netIncomeToCommon") if info.get("netIncomeToCommon") else 1,
             "hist": hist,
             "news": news if news else [],
@@ -76,7 +80,7 @@ def fetch_data(ticker):
 
 
 # -----------------------------
-# SCORING FUNCTIONS
+# SCORING
 # -----------------------------
 def fundamental_score(d):
     score = 0
@@ -167,14 +171,13 @@ def risk_flags(d):
 
 
 def total_score(d):
-    f = fundamental_score(d)
-    t = technical_score(d)
-    s = sentiment_score(d["news"])
-    e = earnings_score(d["financials"])
-    v = valuation_score(d)
-
-    total = f + t + s + e + v
-    return total
+    return (
+        fundamental_score(d)
+        + technical_score(d)
+        + sentiment_score(d["news"])
+        + earnings_score(d["financials"])
+        + valuation_score(d)
+    )
 
 
 def recommendation(score):
@@ -199,14 +202,6 @@ def generate_thesis(d, score, rec, sentiment):
 - Business quality: {'Strong' if score > 65 else 'Moderate'}
 - Trend: {'Uptrend' if d['above_200dma'] else 'Weak'}
 - Sentiment: {sentiment}
-
-**Key Strengths:**
-- Positive earnings profile
-- Manageable leverage
-
-**Risks:**
-- Market volatility
-- Data limitations
 
 ---
 """
@@ -234,9 +229,9 @@ if run:
         rec = recommendation(score)
         flags = risk_flags(d)
 
-        sentiment = sentiment_score(d["news"])
+        sentiment_val = sentiment_score(d["news"])
         sentiment_label = (
-            "POSITIVE" if sentiment == 10 else "NEGATIVE" if sentiment == 0 else "NEUTRAL"
+            "POSITIVE" if sentiment_val == 10 else "NEGATIVE" if sentiment_val == 0 else "NEUTRAL"
         )
 
         results.append({
@@ -257,7 +252,6 @@ if run:
         st.warning("No valid data found")
         st.stop()
 
-    # Ranking
     df["Rank"] = df["Score"].rank(pct=True)
 
     df["Conviction"] = df["Rank"].apply(
@@ -267,7 +261,6 @@ if run:
     st.subheader("📊 Screener Output")
     st.dataframe(df, use_container_width=True)
 
-    # Portfolio
     st.subheader("📈 Top Picks Portfolio")
 
     top = df.sort_values("Score", ascending=False).head(5)
@@ -275,7 +268,6 @@ if run:
 
     st.dataframe(top, use_container_width=True)
 
-    # Details
     for ticker in top["Ticker"]:
         d = data_store[ticker]
 
