@@ -5,48 +5,27 @@ import numpy as np
 from ta.momentum import RSIIndicator
 
 st.set_page_config(layout="wide")
-st.title("🚀 AI Equity Research Platform V5.4")
+st.title("🚀 AI Equity Research Platform V6 (Decision Engine)")
 
 # -----------------------------
 # INPUT
 # -----------------------------
 tickers_input = st.text_input(
     "Enter tickers",
-    "LT.NS,ASIANPAINT.NS,BAJFINANCE.NS,TATAMOTORS.NS,ADANIPORTS.NS,HINDUNILVR.NS,COALINDIA.NS,SBIN.NS,ULTRACEMCO.NS,PIDILITIND.NS"
-)
-
-years = st.slider("Backtest Period (Years)", 1, 5, 2)
-top_n = st.slider("Portfolio Size", 2, 6, 4)
-
-benchmark_choice = st.selectbox(
-    "Select Benchmark",
-    ["Nifty 50", "Sensex", "Bank Nifty", "Nifty Midcap", "Nifty Smallcap"]
+    "RELIANCE.NS,TCS.NS,INFY.NS,HDFCBANK.NS,ADANIPORTS.NS"
 )
 
 tickers = [t.strip() for t in tickers_input.split(",")]
 run = st.button("Run Analysis")
 
 # -----------------------------
-# BENCHMARK MAPPING
-# -----------------------------
-def get_benchmark_ticker(choice):
-    mapping = {
-        "Nifty 50": "^NSEI",
-        "Sensex": "^BSESN",
-        "Bank Nifty": "^NSEBANK",
-        "Nifty Midcap": "^NSEMDCP50",
-        "Nifty Smallcap": "^NSEMDCP50"
-    }
-    return mapping.get(choice, "^NSEI")
-
-# -----------------------------
 # DATA FETCH
 # -----------------------------
 @st.cache_data
-def fetch_data(ticker, period="1y"):
+def fetch_data(ticker):
     try:
         stock = yf.Ticker(ticker)
-        hist = stock.history(period=period)
+        hist = stock.history(period="1y")
 
         if hist.empty:
             return None
@@ -54,17 +33,14 @@ def fetch_data(ticker, period="1y"):
         hist["200DMA"] = hist["Close"].rolling(200).mean()
         hist["RSI"] = RSIIndicator(hist["Close"], 14).rsi()
 
-        return hist
+        return hist, stock
     except:
-        return None
+        return None, None
 
 # -----------------------------
-# LIVE SCORE (TODAY)
+# SCORING + RECOMMENDATION
 # -----------------------------
-def compute_live_score(hist):
-
-    if len(hist) < 200:
-        return None
+def analyze_stock(hist):
 
     price = hist["Close"].dropna().iloc[-1]
     dma = hist["200DMA"].dropna().iloc[-1]
@@ -72,17 +48,16 @@ def compute_live_score(hist):
 
     momentum = price / hist["Close"].iloc[-60] - 1
 
-    if price < dma or momentum <= 0:
-        return None
-
     score = 0
-    score += 30
+
+    if price > dma:
+        score += 30
 
     if momentum > 0.20:
         score += 40
     elif momentum > 0.10:
         score += 25
-    else:
+    elif momentum > 0:
         score += 10
 
     if 55 <= rsi <= 75:
@@ -90,175 +65,127 @@ def compute_live_score(hist):
     elif rsi > 75:
         score += 10
 
-    return score, price, rsi, momentum
-
-# -----------------------------
-# BACKTEST SCORE
-# -----------------------------
-def compute_score_row(hist, i):
-
-    if i < 200:
-        return None
-
-    price = hist["Close"].iloc[i]
-    dma = hist["200DMA"].iloc[i]
-    rsi = hist["RSI"].iloc[i]
-
-    momentum = price / hist["Close"].iloc[i-60] - 1
-
-    if price < dma or momentum <= 0:
-        return None
-
-    score = 0
-    score += 30
-
-    if momentum > 0.20:
-        score += 40
-    elif momentum > 0.10:
-        score += 25
+    # Recommendation
+    if score >= 70:
+        rec = "BUY"
+    elif score >= 50:
+        rec = "HOLD"
     else:
-        score += 10
+        rec = "AVOID"
 
-    if 55 <= rsi <= 75:
-        score += 20
-    elif rsi > 75:
-        score += 10
+    return score, rec, price, rsi, momentum, dma
 
-    return score
+# -----------------------------
+# THESIS GENERATOR
+# -----------------------------
+def generate_thesis(rec, price, dma, rsi, momentum):
+
+    thesis = []
+
+    if price > dma:
+        thesis.append("Strong uptrend (above 200 DMA)")
+    else:
+        thesis.append("Below long-term trend")
+
+    if momentum > 0.15:
+        thesis.append("High price momentum")
+    elif momentum > 0:
+        thesis.append("Moderate momentum")
+    else:
+        thesis.append("Weak/negative momentum")
+
+    if rsi > 70:
+        thesis.append("Overbought zone (risk of pullback)")
+    elif rsi > 50:
+        thesis.append("Healthy momentum zone")
+    else:
+        thesis.append("Weak momentum")
+
+    if rec == "BUY":
+        thesis.append("Trend + momentum aligned → bullish setup")
+    elif rec == "HOLD":
+        thesis.append("Mixed signals → wait for confirmation")
+    else:
+        thesis.append("Weak setup → avoid")
+
+    return " | ".join(thesis)
+
+# -----------------------------
+# NEWS SENTIMENT
+# -----------------------------
+def get_news_sentiment(stock):
+
+    try:
+        news = stock.news[:3]
+
+        sentiments = []
+
+        for item in news:
+            title = item["title"].lower()
+
+            if any(word in title for word in ["growth", "profit", "upgrade", "strong"]):
+                sentiments.append("Positive")
+            elif any(word in title for word in ["fall", "loss", "downgrade", "weak"]):
+                sentiments.append("Negative")
+            else:
+                sentiments.append("Neutral")
+
+        return sentiments, news
+
+    except:
+        return [], []
 
 # -----------------------------
 # MAIN
 # -----------------------------
 if run:
 
-    # =============================
-    # 🎯 LIVE RECOMMENDATIONS
-    # =============================
-    st.subheader("🎯 Top Stock Recommendations (Today)")
-
-    live_results = []
+    results = []
 
     for ticker in tickers:
-        hist = fetch_data(ticker, "1y")
+
+        hist, stock = fetch_data(ticker)
 
         if hist is None:
             continue
 
-        res = compute_live_score(hist)
+        score, rec, price, rsi, momentum, dma = analyze_stock(hist)
 
-        if res is None:
-            continue
+        thesis = generate_thesis(rec, price, dma, rsi, momentum)
 
-        score, price, rsi, momentum = res
+        sentiments, news = get_news_sentiment(stock)
 
-        live_results.append({
+        results.append({
             "Ticker": ticker,
             "Price": round(price, 2),
             "Score": score,
+            "Recommendation": rec,
             "RSI": round(rsi, 2),
-            "Momentum %": round(momentum * 100, 2)
+            "Momentum %": round(momentum*100, 2),
+            "Thesis": thesis,
+            "News Sentiment": ", ".join(sentiments)
         })
 
-    if len(live_results) > 0:
-        live_df = pd.DataFrame(live_results).sort_values(by="Score", ascending=False)
+    df = pd.DataFrame(results).sort_values(by="Score", ascending=False)
 
-        st.dataframe(live_df, use_container_width=True)
+    st.subheader("🎯 Stock Recommendations")
+    st.dataframe(df, use_container_width=True)
 
-        st.subheader("🔥 Top Picks (Actionable)")
-        st.dataframe(live_df.head(top_n), use_container_width=True)
-
-    else:
-        st.warning("No strong opportunities right now")
-
-    # =============================
-    # 📊 BACKTEST ENGINE
-    # =============================
-    st.subheader("📊 Running Strategy Backtest...")
-
-    data = {}
+    # -----------------------------
+    # Detailed View
+    # -----------------------------
+    st.subheader("📰 News + Thesis Details")
 
     for ticker in tickers:
-        hist = fetch_data(ticker, f"{years}y")
-        if hist is not None:
-            data[ticker] = hist
 
-    if len(data) == 0:
-        st.warning("No data available")
-        st.stop()
+        hist, stock = fetch_data(ticker)
 
-    dates = list(data[list(data.keys())[0]].index)
-
-    portfolio_returns = []
-    step = 15
-
-    for i in range(200, len(dates)-step, step):
-
-        scores = {}
-
-        for ticker, hist in data.items():
-            if i >= len(hist):
-                continue
-
-            score = compute_score_row(hist, i)
-
-            if score is not None:
-                scores[ticker] = score
-
-        if len(scores) == 0:
-            portfolio_returns.append(0)
+        if hist is None:
             continue
 
-        selected = sorted(scores, key=scores.get, reverse=True)[:top_n]
+        st.markdown(f"### {ticker}")
 
-        period_returns = []
+        sentiments, news = get_news_sentiment(stock)
 
-        for ticker in selected:
-            hist = data[ticker]
-
-            if i+step < len(hist):
-                ret = hist["Close"].iloc[i+step] / hist["Close"].iloc[i] - 1
-                period_returns.append(ret)
-
-        if len(period_returns) > 0:
-            portfolio_returns.append(np.mean(period_returns))
-        else:
-            portfolio_returns.append(0)
-
-    if len(portfolio_returns) == 0:
-        st.warning("No backtest results")
-        st.stop()
-
-    portfolio_series = pd.Series(portfolio_returns)
-    cumulative = (1 + portfolio_series).cumprod()
-
-    # =============================
-    # 📈 BENCHMARK
-    # =============================
-    benchmark_ticker = get_benchmark_ticker(benchmark_choice)
-
-    benchmark = yf.Ticker(benchmark_ticker).history(period=f"{years}y")
-
-    benchmark_returns = []
-
-    for i in range(0, len(benchmark)-step, step):
-        ret = benchmark["Close"].iloc[i+step] / benchmark["Close"].iloc[i] - 1
-        benchmark_returns.append(ret)
-
-    benchmark_series = pd.Series(benchmark_returns)
-    benchmark_cum = (1 + benchmark_series).cumprod()
-
-    min_len = min(len(cumulative), len(benchmark_cum))
-
-    st.subheader("📈 Strategy vs Benchmark")
-
-    st.line_chart(pd.DataFrame({
-        "Strategy": cumulative.iloc[:min_len].values,
-        benchmark_choice: benchmark_cum.iloc[:min_len].values
-    }))
-
-    strategy_return = cumulative.iloc[-1] - 1
-    benchmark_return = benchmark_cum.iloc[-1] - 1
-
-    col1, col2 = st.columns(2)
-    col1.metric("Strategy Return", f"{round(strategy_return*100,2)}%")
-    col2.metric(f"{benchmark_choice} Return", f"{round(benchmark_return*100,2)}%")
+        for i, item in enumerate(news[:3]):
+            st.write(f"- {item['title']} ({sentiments[i]})")
