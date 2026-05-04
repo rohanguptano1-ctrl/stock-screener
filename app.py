@@ -5,7 +5,7 @@ import numpy as np
 from ta.momentum import RSIIndicator
 
 st.set_page_config(layout="wide")
-st.title("🚀 AI Equity Research Platform V9.1")
+st.title("🚀 AI Equity Research Platform V9.2")
 
 # -----------------------------
 # MODE
@@ -26,17 +26,15 @@ def get_benchmark(choice):
     }[choice]
 
 # -----------------------------
-# FETCH DATA (FIXED)
+# FETCH DATA (FIXED PROPERLY)
 # -----------------------------
 @st.cache_data
-def fetch_data(ticker, period="1y"):
+def fetch_data(ticker, period="2y"):
     try:
         hist = yf.Ticker(ticker).history(period=period)
 
         if hist is None or hist.empty:
             return None
-
-        hist = hist.copy()
 
         hist["200DMA"] = hist["Close"].rolling(200).mean()
         hist["RSI"] = RSIIndicator(hist["Close"], 14).rsi()
@@ -47,38 +45,48 @@ def fetch_data(ticker, period="1y"):
         return None
 
 # -----------------------------
-# SAFE ANALYSIS (FIXED)
+# ANALYSIS (FIXED)
 # -----------------------------
 def analyze(hist):
 
-    hist = hist.dropna()
+    # Only drop rows where Close missing (NOT all columns)
+    hist = hist.dropna(subset=["Close"])
 
-    if len(hist) < 60:
+    if len(hist) < 220:   # ensure 200DMA stability
         return None
 
-    price = hist["Close"].iloc[-1]
-    dma = hist["200DMA"].iloc[-1]
-    rsi = hist["RSI"].iloc[-1]
+    latest = hist.iloc[-1]
+
+    price = latest["Close"]
+    dma = latest["200DMA"]
+    rsi = latest["RSI"]
+
+    if pd.isna(dma) or pd.isna(rsi):
+        return None
 
     momentum = price / hist["Close"].iloc[-60] - 1
 
     score = 0
 
+    # TREND (strong weight)
     if price > dma:
-        score += 30
-
-    if momentum > 0.2:
         score += 40
-    elif momentum > 0.1:
-        score += 25
+
+    # MOMENTUM
+    if momentum > 0.25:
+        score += 30
+    elif momentum > 0.15:
+        score += 20
     elif momentum > 0:
         score += 10
 
-    if 55 <= rsi <= 75:
+    # RSI
+    if 55 <= rsi <= 70:
         score += 20
-    elif rsi > 75:
+    elif rsi > 70:
         score += 10
 
+    # FINAL CALL
     if score >= 70:
         rec = "BUY"
     elif score >= 50:
@@ -92,9 +100,8 @@ def analyze(hist):
 # THESIS
 # -----------------------------
 def thesis(rec, price, dma, rsi, momentum):
-
     return " | ".join([
-        "Uptrend" if price > dma else "Weak trend",
+        "Uptrend" if price > dma else "Downtrend",
         "Strong momentum" if momentum > 0.15 else "Weak momentum",
         "Healthy RSI" if rsi > 50 else "Weak RSI",
         rec
@@ -117,15 +124,14 @@ if mode == "Stock Analyzer":
             res = analyze(hist)
 
             if res is None:
-                st.error("Not enough valid data (need ~60 clean days)")
+                st.error("Not enough usable data (need ~220 days)")
             else:
                 score, rec, price, rsi, momentum, dma = res
 
-                col1, col2, col3 = st.columns(3)
-
-                col1.metric("Price", round(price,2))
-                col2.metric("RSI", round(rsi,2))
-                col3.metric("Momentum %", round(momentum*100,2))
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Price", round(price,2))
+                c2.metric("RSI", round(rsi,2))
+                c3.metric("Momentum %", round(momentum*100,2))
 
                 st.subheader(f"Recommendation: {rec}")
                 st.write(thesis(rec, price, dma, rsi, momentum))
@@ -169,14 +175,14 @@ elif mode == "Screener":
                 "Momentum %": round(momentum*100,2)
             })
 
-        if len(rows) == 0:
-            st.warning("No valid stocks found")
+        if not rows:
+            st.warning("No valid stocks found (increase universe or time period)")
         else:
             df = pd.DataFrame(rows).sort_values(by="Score", ascending=False)
             st.dataframe(df, use_container_width=True)
 
 # =============================
-# 3️⃣ BACKTEST LAB
+# 3️⃣ BACKTEST LAB (IMPROVED)
 # =============================
 elif mode == "Backtest Lab":
 
@@ -185,7 +191,7 @@ elif mode == "Backtest Lab":
         "RELIANCE.NS,TCS.NS,INFY.NS,HDFCBANK.NS"
     )
 
-    years = st.slider("Years", 1, 5, 2)
+    years = st.slider("Years", 1, 5, 3)
 
     benchmark_choice = st.selectbox(
         "Benchmark",
@@ -203,7 +209,7 @@ elif mode == "Backtest Lab":
             if hist is not None:
                 data[t] = hist
 
-        if len(data) == 0:
+        if not data:
             st.error("No data")
             st.stop()
 
@@ -212,11 +218,12 @@ elif mode == "Backtest Lab":
         returns = []
         step = 20
 
-        for i in range(200, len(dates)-step, step):
+        for i in range(220, len(dates)-step, step):
 
             scores = {}
 
             for t, hist in data.items():
+
                 if i >= len(hist):
                     continue
 
@@ -225,13 +232,17 @@ elif mode == "Backtest Lab":
                 if res:
                     scores[t] = res[0]
 
-            selected = sorted(scores, key=scores.get, reverse=True)[:3]
+            # only BUY stocks
+            selected = [t for t in scores if scores[t] >= 70]
+
+            if not selected:
+                returns.append(0)
+                continue
 
             period = []
 
             for t in selected:
                 hist = data[t]
-
                 if i+step < len(hist):
                     r = hist["Close"].iloc[i+step] / hist["Close"].iloc[i] - 1
                     period.append(r)
@@ -261,7 +272,6 @@ elif mode == "Backtest Lab":
             benchmark_choice: bench_cum.iloc[:min_len].values
         }))
 
-        col1, col2 = st.columns(2)
-
-        col1.metric("Strategy Return", f"{round((strat_cum.iloc[-1]-1)*100,2)}%")
-        col2.metric(f"{benchmark_choice} Return", f"{round((bench_cum.iloc[-1]-1)*100,2)}%")
+        c1, c2 = st.columns(2)
+        c1.metric("Strategy Return", f"{round((strat_cum.iloc[-1]-1)*100,2)}%")
+        c2.metric(f"{benchmark_choice} Return", f"{round((bench_cum.iloc[-1]-1)*100,2)}%")
