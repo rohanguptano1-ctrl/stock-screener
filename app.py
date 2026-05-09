@@ -1,6 +1,3 @@
-# V12.5 AI Equity Research Platform (app.py)
-
-```python
 import streamlit as st
 import yfinance as yf
 import pandas as pd
@@ -8,19 +5,11 @@ import numpy as np
 
 st.set_page_config(page_title="AI Equity Research Platform V12.5", layout="wide")
 
-# =====================================================
-# CONFIG
-# =====================================================
-
 BENCHMARKS = {
     "Nifty 50": "^NSEI",
     "Sensex": "^BSESN",
     "S&P 500": "^GSPC"
 }
-
-# =====================================================
-# SIDEBAR
-# =====================================================
 
 st.sidebar.title("Controls")
 
@@ -67,26 +56,17 @@ tickers = [
 
 st.title("🚀 AI Equity Research Platform V12.5")
 
-# =====================================================
-# TOOLTIP TEXT
-# =====================================================
-
 TOOLTIPS = {
-    "RSI": "Relative Strength Index. Measures momentum. 50-70 is generally bullish.",
-    "Momentum": "20-day price momentum percentage.",
-    "Relative Strength": "Performance vs benchmark over recent period.",
-    "Sharpe": "Risk-adjusted return metric. Higher is better.",
-    "Drawdown": "Largest peak-to-trough decline.",
+    "RSI": "Relative Strength Index. Measures momentum.",
+    "Momentum": "20-day momentum percentage.",
+    "Relative Strength": "Performance relative to benchmark.",
+    "Sharpe": "Risk adjusted return metric.",
+    "Drawdown": "Largest decline from peak.",
     "CAGR": "Compounded annual growth rate.",
-    "Score": "Composite factor score based on trend, momentum, RSI and relative strength."
+    "Score": "Composite quantitative score."
 }
 
-# =====================================================
-# DATA FETCH
-# =====================================================
-
 @st.cache_data
-
 def fetch_data(ticker, years=5):
 
     try:
@@ -117,9 +97,6 @@ def fetch_data(ticker, years=5):
     except:
         return None
 
-# =====================================================
-# FACTOR ENGINE
-# =====================================================
 
 def compute_factors(df, benchmark_df):
 
@@ -218,9 +195,6 @@ def compute_factors(df, benchmark_df):
     except:
         return None
 
-# =====================================================
-# THESIS ENGINE
-# =====================================================
 
 def generate_thesis(metrics):
 
@@ -228,32 +202,29 @@ def generate_thesis(metrics):
     risks = []
 
     if metrics["Price"] > metrics["SMA200"]:
-        thesis.append("Stock remains above 200DMA indicating long-term uptrend.")
+        thesis.append("Stock above 200DMA indicates bullish long-term trend.")
     else:
         risks.append("Price below 200DMA indicates weak long-term trend.")
 
     if metrics["Momentum"] > 5:
-        thesis.append("Momentum remains strong over recent sessions.")
+        thesis.append("Momentum remains strong.")
     else:
         risks.append("Momentum remains weak.")
 
     if metrics["RelStrength"] > 0:
-        thesis.append("Stock is outperforming benchmark.")
+        thesis.append("Stock outperforming benchmark.")
     else:
         risks.append("Stock underperforming benchmark.")
 
     if metrics["RSI"] > 70:
-        risks.append("RSI indicates overbought conditions.")
+        risks.append("RSI approaching overbought zone.")
     elif metrics["RSI"] < 40:
         risks.append("RSI remains weak.")
     else:
-        thesis.append("RSI remains in healthy bullish zone.")
+        thesis.append("RSI remains healthy.")
 
     return thesis, risks
 
-# =====================================================
-# BENCHMARK
-# =====================================================
 
 benchmark_df = fetch_data(benchmark_ticker, years)
 
@@ -261,9 +232,6 @@ if benchmark_df is None:
     st.error("Benchmark failed")
     st.stop()
 
-# =====================================================
-# SCREENER
-# =====================================================
 
 if mode == "📊 Screener":
 
@@ -302,12 +270,8 @@ if mode == "📊 Screener":
             result_df = pd.DataFrame(rows)
             result_df = result_df.sort_values(by="Score", ascending=False)
 
-            st.caption(TOOLTIPS["Score"])
             st.dataframe(result_df, use_container_width=True)
 
-# =====================================================
-# SINGLE STOCK
-# =====================================================
 
 elif mode == "🔍 Single Stock":
 
@@ -333,40 +297,18 @@ elif mode == "🔍 Single Stock":
 
         c1, c2, c3, c4 = st.columns(4)
 
-        c1.metric(
-            "Price",
-            metrics["Price"],
-            help="Current stock price"
-        )
-
-        c2.metric(
-            "RSI",
-            metrics["RSI"],
-            help=TOOLTIPS["RSI"]
-        )
-
-        c3.metric(
-            "Momentum %",
-            metrics["Momentum"],
-            help=TOOLTIPS["Momentum"]
-        )
-
-        c4.metric(
-            "Relative Strength %",
-            metrics["RelStrength"],
-            help=TOOLTIPS["Relative Strength"]
-        )
+        c1.metric("Price", metrics["Price"])
+        c2.metric("RSI", metrics["RSI"], help=TOOLTIPS["RSI"])
+        c3.metric("Momentum %", metrics["Momentum"], help=TOOLTIPS["Momentum"])
+        c4.metric("Relative Strength %", metrics["RelStrength"], help=TOOLTIPS["Relative Strength"])
 
         st.markdown(f"## Recommendation: {metrics['Recommendation']}")
-
-        # CHART
 
         chart_df = metrics["Data"][["Close", "SMA50", "SMA200"]]
 
         st.subheader("📈 Price Chart")
-        st.line_chart(chart_df)
 
-        # CHART ANALYSIS
+        st.line_chart(chart_df)
 
         st.subheader("🧠 Chart Analysis")
 
@@ -374,7 +316,7 @@ elif mode == "🔍 Single Stock":
 
         if metrics["Price"] > metrics["SMA200"]:
             chart_analysis.append(
-                "Price trading above 200DMA indicates long-term bullish structure."
+                "Price trading above 200DMA indicates bullish structure."
             )
 
         if metrics["SMA50"] > metrics["SMA200"]:
@@ -384,34 +326,27 @@ elif mode == "🔍 Single Stock":
 
         if metrics["Momentum"] > 5:
             chart_analysis.append(
-                "Momentum expansion suggests institutional accumulation."
+                "Momentum expansion suggests accumulation."
             )
 
         if metrics["RSI"] > 70:
             chart_analysis.append(
-                "RSI entering overbought zone may indicate short-term consolidation risk."
+                "RSI indicates possible short-term overheating."
             )
 
         for line in chart_analysis:
             st.write(f"- {line}")
-
-        # THESIS
 
         st.subheader("📋 Investment Thesis")
 
         for item in thesis:
             st.write(f"✅ {item}")
 
-        # RISKS
-
         st.subheader("⚠️ Risk Factors")
 
         for item in risks:
             st.write(f"⚠️ {item}")
 
-# =====================================================
-# BACKTEST
-# =====================================================
 
 elif mode == "📈 Portfolio Backtest":
 
@@ -501,34 +436,14 @@ elif mode == "📈 Portfolio Backtest":
 
         c1, c2, c3, c4 = st.columns(4)
 
-        c1.metric(
-            "Strategy Return",
-            f"{strategy_return:.2f}%",
-            help="Total portfolio return"
-        )
-
-        c2.metric(
-            "Benchmark Return",
-            f"{benchmark_return:.2f}%",
-            help="Benchmark performance"
-        )
-
-        c3.metric(
-            "CAGR",
-            f"{cagr:.2f}%",
-            help=TOOLTIPS["CAGR"]
-        )
-
-        c4.metric(
-            "Sharpe Ratio",
-            f"{sharpe:.2f}",
-            help=TOOLTIPS["Sharpe"]
-        )
+        c1.metric("Strategy Return", f"{strategy_return:.2f}%")
+        c2.metric("Benchmark Return", f"{benchmark_return:.2f}%")
+        c3.metric("CAGR", f"{cagr:.2f}%")
+        c4.metric("Sharpe Ratio", f"{sharpe:.2f}")
 
         st.metric(
             "Max Drawdown",
-            f"{max_drawdown:.2f}%",
-            help=TOOLTIPS["Drawdown"]
+            f"{max_drawdown:.2f}%"
         )
 
         selected_df = pd.DataFrame([
@@ -540,5 +455,5 @@ elif mode == "📈 Portfolio Backtest":
         ])
 
         st.subheader("Selected Portfolio")
+
         st.dataframe(selected_df, use_container_width=True)
-```
