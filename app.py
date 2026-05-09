@@ -8,24 +8,11 @@ import numpy as np
 # =========================================================
 
 st.set_page_config(
-    page_title="AI Equity Research Platform V11.5",
+    page_title="AI Equity Research Platform V12",
     layout="wide"
 )
 
-st.title("🚀 AI Equity Research Platform V11.5")
-
-# =========================================================
-# BENCHMARK MAP
-# =========================================================
-
-BENCHMARKS = {
-    "Nifty 50": "^NSEI",
-    "Sensex": "^BSESN",
-    "Bank Nifty": "^NSEBANK",
-    "Nifty IT": "^CNXIT",
-    "S&P 500": "^GSPC",
-    "NASDAQ": "^IXIC"
-}
+st.title("🚀 AI Equity Research Platform V12")
 
 # =========================================================
 # SIDEBAR
@@ -34,18 +21,33 @@ BENCHMARKS = {
 st.sidebar.title("Controls")
 
 mode = st.sidebar.radio(
-    "Select Mode",
-    ["📊 Screener", "🔍 Single Stock", "📈 Backtest"]
+    "Mode",
+    [
+        "📊 Screener",
+        "🔍 Single Stock",
+        "📈 Portfolio Backtest"
+    ]
 )
 
-ticker_input = st.sidebar.text_input(
+ticker_input = st.sidebar.text_area(
     "Tickers",
-    "RELIANCE.NS,TCS.NS,INFY.NS,HDFCBANK.NS"
+    "RELIANCE.NS,TCS.NS,INFY.NS,HDFCBANK.NS,ICICIBANK.NS"
 )
 
 benchmark_name = st.sidebar.selectbox(
     "Benchmark",
-    list(BENCHMARKS.keys())
+    [
+        "Nifty 50",
+        "Sensex",
+        "S&P 500"
+    ]
+)
+
+top_n = st.sidebar.slider(
+    "Top N Stocks",
+    1,
+    10,
+    5
 )
 
 years = st.sidebar.slider(
@@ -55,7 +57,19 @@ years = st.sidebar.slider(
     3
 )
 
-benchmark_ticker = BENCHMARKS[benchmark_name]
+benchmark_map = {
+    "Nifty 50": "^NSEI",
+    "Sensex": "^BSESN",
+    "S&P 500": "^GSPC"
+}
+
+benchmark_ticker = benchmark_map[benchmark_name]
+
+tickers = [
+    x.strip().upper()
+    for x in ticker_input.split(",")
+    if x.strip()
+]
 
 # =========================================================
 # DATA FETCH
@@ -82,7 +96,10 @@ def fetch_data(ticker, years=5):
         df = df.copy()
 
         for col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
+            df[col] = pd.to_numeric(
+                df[col],
+                errors="coerce"
+            )
 
         df.dropna(inplace=True)
 
@@ -95,19 +112,24 @@ def fetch_data(ticker, years=5):
         return None
 
 # =========================================================
-# METRICS ENGINE
+# FACTOR ENGINE
 # =========================================================
 
-def compute_metrics(df, benchmark_df):
+def compute_factors(df, benchmark_df):
 
     try:
 
         df = df.copy()
-        benchmark_df = benchmark_df.copy()
 
-        # TECHNICALS
-        df["SMA50"] = df["Close"].rolling(50).mean()
-        df["SMA200"] = df["Close"].rolling(200).mean()
+        # =====================
+        # INDICATORS
+        # =====================
+
+        df["SMA200"] = (
+            df["Close"]
+            .rolling(200)
+            .mean()
+        )
 
         delta = df["Close"].diff()
 
@@ -121,83 +143,129 @@ def compute_metrics(df, benchmark_df):
 
         df["RSI"] = 100 - (100 / (1 + rs))
 
+        # =====================
+        # MOMENTUM
+        # =====================
+
         df["Momentum20"] = (
-            (df["Close"] / df["Close"].shift(20)) - 1
+            (
+                df["Close"]
+                /
+                df["Close"].shift(20)
+            ) - 1
         ) * 100
 
-        # RETURNS
-        df["Returns"] = df["Close"].pct_change()
+        # =====================
+        # VOLATILITY
+        # =====================
 
-        benchmark_df["Returns"] = (
-            benchmark_df["Close"].pct_change()
+        df["Returns"] = (
+            df["Close"]
+            .pct_change()
         )
 
-        stock_ret = (
-            (1 + df["Returns"].dropna()).prod() - 1
+        volatility = (
+            df["Returns"]
+            .rolling(20)
+            .std()
+            .iloc[-1]
         )
 
-        benchmark_ret = (
-            (1 + benchmark_df["Returns"].dropna()).prod() - 1
+        # =====================
+        # RELATIVE STRENGTH
+        # =====================
+
+        stock_return = (
+            (
+                df["Close"].iloc[-1]
+                /
+                df["Close"].iloc[-60]
+            ) - 1
+        )
+
+        benchmark_return = (
+            (
+                benchmark_df["Close"].iloc[-1]
+                /
+                benchmark_df["Close"].iloc[-60]
+            ) - 1
         )
 
         rel_strength = (
-            (stock_ret - benchmark_ret) * 100
-        )
+            stock_return - benchmark_return
+        ) * 100
 
         latest = df.iloc[-1]
 
-        price = round(float(latest["Close"]), 2)
-        rsi = round(float(latest["RSI"]), 2)
-        momentum = round(float(latest["Momentum20"]), 2)
+        price = float(latest["Close"])
+        sma200 = float(latest["SMA200"])
+        rsi = float(latest["RSI"])
+        momentum = float(latest["Momentum20"])
 
-        above_200dma = (
-            float(latest["Close"]) > float(latest["SMA200"])
-        )
-
+        # =====================
         # SCORE
+        # =====================
+
         score = 0
-        thesis = []
 
-        if above_200dma:
-            score += 40
-            thesis.append("Above 200DMA")
-        else:
-            thesis.append("Below 200DMA")
-
-        if momentum > 5:
-            score += 30
-            thesis.append("Strong momentum")
-        elif momentum > 0:
-            score += 15
-            thesis.append("Mild momentum")
-        else:
-            thesis.append("Negative momentum")
-
-        if rsi > 55:
+        # Relative strength
+        if rel_strength > 10:
+            score += 35
+        elif rel_strength > 0:
             score += 20
-            thesis.append("Healthy RSI")
-        elif rsi < 40:
-            thesis.append("Weak RSI")
 
-        if rel_strength > 0:
+        # Trend
+        if price > sma200:
+            score += 25
+
+        # Momentum
+        if momentum > 10:
+            score += 20
+        elif momentum > 0:
             score += 10
-            thesis.append("Outperforming market")
-        else:
-            thesis.append("Underperforming market")
 
-        # RECOMMENDATION
-        if score >= 80:
+        # RSI
+        if 50 <= rsi <= 70:
+            score += 10
+
+        # Volatility penalty
+        if volatility < 0.025:
+            score += 10
+
+        # Recommendation
+        if score >= 70:
             recommendation = "BUY"
         elif score >= 50:
             recommendation = "HOLD"
         else:
             recommendation = "AVOID"
 
+        thesis = []
+
+        thesis.append(
+            "Above 200DMA"
+            if price > sma200
+            else "Below 200DMA"
+        )
+
+        thesis.append(
+            "Strong momentum"
+            if momentum > 0
+            else "Weak momentum"
+        )
+
+        thesis.append(
+            "Outperforming benchmark"
+            if rel_strength > 0
+            else "Underperforming benchmark"
+        )
+
         return {
-            "Price": price,
-            "RSI": rsi,
-            "Momentum": momentum,
+            "Price": round(price, 2),
+            "RSI": round(rsi, 2),
+            "Momentum": round(momentum, 2),
             "RelStrength": round(rel_strength, 2),
+            "Volatility": round(volatility * 100, 2),
             "Score": score,
             "Recommendation": recommendation,
             "Thesis": " | ".join(thesis),
@@ -211,22 +279,36 @@ def compute_metrics(df, benchmark_df):
 # MARKET FILTER
 # =========================================================
 
-def market_is_positive(benchmark_df):
+def market_ok(benchmark_df):
 
     benchmark_df = benchmark_df.copy()
 
     benchmark_df["SMA200"] = (
-        benchmark_df["Close"].rolling(200).mean()
+        benchmark_df["Close"]
+        .rolling(200)
+        .mean()
     )
-
-    benchmark_df.dropna(inplace=True)
 
     latest = benchmark_df.iloc[-1]
 
     return (
-        float(latest["Close"]) >
+        float(latest["Close"])
+        >
         float(latest["SMA200"])
     )
+
+# =========================================================
+# LOAD BENCHMARK
+# =========================================================
+
+benchmark_df = fetch_data(
+    benchmark_ticker,
+    years
+)
+
+if benchmark_df is None:
+    st.error("Benchmark failed")
+    st.stop()
 
 # =========================================================
 # SCREENER
@@ -237,25 +319,6 @@ if mode == "📊 Screener":
     st.subheader("📊 Screener")
 
     if st.button("Run Screener"):
-
-        tickers = [
-            x.strip().upper()
-            for x in ticker_input.split(",")
-            if x.strip()
-        ]
-
-        benchmark_df = fetch_data(
-            benchmark_ticker,
-            years
-        )
-
-        if benchmark_df is None:
-            st.error("Benchmark unavailable")
-            st.stop()
-
-        market_ok = market_is_positive(
-            benchmark_df
-        )
 
         rows = []
 
@@ -269,7 +332,7 @@ if mode == "📊 Screener":
             if df is None:
                 continue
 
-            metrics = compute_metrics(
+            metrics = compute_factors(
                 df,
                 benchmark_df
             )
@@ -277,38 +340,32 @@ if mode == "📊 Screener":
             if metrics is None:
                 continue
 
-            recommendation = metrics["Recommendation"]
-
-            if not market_ok:
-
-                if recommendation == "BUY":
-                    recommendation = "HOLD (Market Weak)"
-
-                elif recommendation == "HOLD":
-                    recommendation = "AVOID (Market Weak)"
-
             rows.append({
                 "Ticker": ticker,
                 "Price": metrics["Price"],
                 "Score": metrics["Score"],
-                "Recommendation": recommendation,
+                "Recommendation": metrics["Recommendation"],
                 "RSI": metrics["RSI"],
                 "Momentum %": metrics["Momentum"],
                 "Rel Strength %": metrics["RelStrength"],
+                "Volatility %": metrics["Volatility"],
                 "Thesis": metrics["Thesis"]
             })
 
         if len(rows) == 0:
 
-            st.warning("No valid stocks found")
+            st.warning("No valid stocks")
 
         else:
 
             result_df = pd.DataFrame(rows)
 
-            result_df = result_df.sort_values(
-                by="Score",
-                ascending=False
+            result_df = (
+                result_df
+                .sort_values(
+                    by="Score",
+                    ascending=False
+                )
             )
 
             st.dataframe(
@@ -322,21 +379,11 @@ if mode == "📊 Screener":
 
 elif mode == "🔍 Single Stock":
 
-    st.subheader("🔍 Single Stock Analysis")
+    st.subheader("🔍 Single Stock")
 
     if st.button("Analyze Stock"):
 
-        ticker = (
-            ticker_input
-            .split(",")[0]
-            .strip()
-            .upper()
-        )
-
-        benchmark_df = fetch_data(
-            benchmark_ticker,
-            years
-        )
+        ticker = tickers[0]
 
         df = fetch_data(
             ticker,
@@ -344,20 +391,16 @@ elif mode == "🔍 Single Stock":
         )
 
         if df is None:
-            st.error("Stock unavailable")
+            st.error("Invalid stock")
             st.stop()
 
-        if benchmark_df is None:
-            st.error("Benchmark unavailable")
-            st.stop()
-
-        metrics = compute_metrics(
+        metrics = compute_factors(
             df,
             benchmark_df
         )
 
         if metrics is None:
-            st.error("Could not compute metrics")
+            st.error("Metrics failed")
             st.stop()
 
         c1, c2, c3, c4 = st.columns(4)
@@ -378,7 +421,7 @@ elif mode == "🔍 Single Stock":
         )
 
         c4.metric(
-            "Rel Strength %",
+            "Relative Strength %",
             metrics["RelStrength"]
         )
 
@@ -389,37 +432,26 @@ elif mode == "🔍 Single Stock":
         st.write(metrics["Thesis"])
 
 # =========================================================
-# BACKTEST
+# PORTFOLIO BACKTEST
 # =========================================================
 
-elif mode == "📈 Backtest":
+elif mode == "📈 Portfolio Backtest":
 
-    st.subheader("📈 Backtest")
+    st.subheader("📈 Portfolio Backtest")
 
-    if st.button("Run Backtest"):
+    if st.button("Run Portfolio Backtest"):
 
-        tickers = [
-            x.strip().upper()
-            for x in ticker_input.split(",")
-            if x.strip()
-        ]
-
-        benchmark_df = fetch_data(
-            benchmark_ticker,
-            years
-        )
-
-        if benchmark_df is None:
-            st.error("Benchmark unavailable")
-            st.stop()
-
-        benchmark_df["Returns"] = (
+        benchmark_returns = (
             benchmark_df["Close"]
             .pct_change()
             .fillna(0)
         )
 
-        strategy_returns = []
+        benchmark_curve = (
+            1 + benchmark_returns
+        ).cumprod()
+
+        all_stock_returns = []
 
         for ticker in tickers:
 
@@ -431,7 +463,7 @@ elif mode == "📈 Backtest":
             if df is None:
                 continue
 
-            metrics = compute_metrics(
+            metrics = compute_factors(
                 df,
                 benchmark_df
             )
@@ -439,58 +471,115 @@ elif mode == "📈 Backtest":
             if metrics is None:
                 continue
 
-            signal = (
-                1 if metrics["Score"] >= 50 else 0
-            )
+            score = metrics["Score"]
 
-            strat_ret = (
-                metrics["Returns"] * signal
-            )
+            all_stock_returns.append({
+                "Ticker": ticker,
+                "Score": score,
+                "Returns": metrics["Returns"]
+            })
 
-            strategy_returns.append(strat_ret)
-
-        if len(strategy_returns) == 0:
+        if len(all_stock_returns) == 0:
 
             st.error("No valid stocks")
             st.stop()
 
-        combined = pd.concat(
-            strategy_returns,
+        ranked = sorted(
+            all_stock_returns,
+            key=lambda x: x["Score"],
+            reverse=True
+        )
+
+        selected = ranked[:top_n]
+
+        strategy_returns = pd.concat(
+            [
+                x["Returns"]
+                for x in selected
+            ],
             axis=1
         ).mean(axis=1)
 
-        combined = combined.fillna(0)
+        strategy_returns = (
+            strategy_returns
+            .fillna(0)
+        )
 
         strategy_curve = (
-            1 + combined
+            1 + strategy_returns
         ).cumprod()
 
-        benchmark_curve = (
-            1 + benchmark_df["Returns"]
-        ).cumprod()
-
-        # ALIGN
         common_index = (
-            strategy_curve.index.intersection(
+            strategy_curve.index
+            .intersection(
                 benchmark_curve.index
             )
         )
 
         strategy_curve = (
-            strategy_curve.loc[common_index]
+            strategy_curve
+            .loc[common_index]
         )
 
         benchmark_curve = (
-            benchmark_curve.loc[common_index]
+            benchmark_curve
+            .loc[common_index]
         )
 
+        # =====================
+        # PERFORMANCE METRICS
+        # =====================
+
         strategy_return = (
-            (strategy_curve.iloc[-1] - 1) * 100
+            (
+                strategy_curve.iloc[-1]
+                - 1
+            ) * 100
         )
 
         benchmark_return = (
-            (benchmark_curve.iloc[-1] - 1) * 100
+            (
+                benchmark_curve.iloc[-1]
+                - 1
+            ) * 100
         )
+
+        cagr = (
+            (
+                strategy_curve.iloc[-1]
+            ) ** (
+                1 / years
+            ) - 1
+        ) * 100
+
+        drawdown = (
+            strategy_curve
+            /
+            strategy_curve.cummax()
+            - 1
+        )
+
+        max_drawdown = (
+            drawdown.min()
+        ) * 100
+
+        volatility = (
+            strategy_returns.std()
+            * np.sqrt(252)
+            * 100
+        )
+
+        sharpe = (
+            (
+                strategy_returns.mean()
+                /
+                strategy_returns.std()
+            ) * np.sqrt(252)
+        )
+
+        # =====================
+        # DISPLAY
+        # =====================
 
         chart_df = pd.DataFrame({
             "Strategy": strategy_curve,
@@ -499,14 +588,44 @@ elif mode == "📈 Backtest":
 
         st.line_chart(chart_df)
 
-        c1, c2 = st.columns(2)
+        m1, m2, m3, m4, m5 = st.columns(5)
 
-        c1.metric(
+        m1.metric(
             "Strategy Return",
             f"{strategy_return:.2f}%"
         )
 
-        c2.metric(
-            f"{benchmark_name} Return",
+        m2.metric(
+            "Benchmark Return",
             f"{benchmark_return:.2f}%"
+        )
+
+        m3.metric(
+            "CAGR",
+            f"{cagr:.2f}%"
+        )
+
+        m4.metric(
+            "Max Drawdown",
+            f"{max_drawdown:.2f}%"
+        )
+
+        m5.metric(
+            "Sharpe Ratio",
+            f"{sharpe:.2f}"
+        )
+
+        selected_df = pd.DataFrame([
+            {
+                "Ticker": x["Ticker"],
+                "Score": x["Score"]
+            }
+            for x in selected
+        ])
+
+        st.subheader("Selected Portfolio")
+
+        st.dataframe(
+            selected_df,
+            use_container_width=True
         )
