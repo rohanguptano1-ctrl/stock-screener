@@ -9,11 +9,11 @@ import plotly.graph_objects as go
 # =========================================================
 
 st.set_page_config(
-    page_title="AI Equity Research Platform V16",
+    page_title="AI Equity Research Platform V16.1",
     layout="wide"
 )
 
-st.title("🚀 AI Equity Research Platform V16")
+st.title("🚀 AI Equity Research Platform V16.1")
 
 # =========================================================
 # HELPERS
@@ -241,9 +241,16 @@ if st.button("Run Portfolio Backtest"):
         .fillna(0)
     )
 
-    benchmark_returns = benchmark_returns.last(
-        f"{years}Y"
-    )
+    # =====================================================
+    # FIXED BUG HERE
+    # =====================================================
+
+    benchmark_returns = benchmark_returns[
+        benchmark_returns.index >= (
+            benchmark_returns.index.max()
+            - pd.DateOffset(years=years)
+        )
+    ]
 
     portfolio_data = []
 
