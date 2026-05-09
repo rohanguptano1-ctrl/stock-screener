@@ -2,18 +2,17 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
-import plotly.graph_objects as go
 
 # =========================================================
 # PAGE CONFIG
 # =========================================================
 
 st.set_page_config(
-    page_title="AI Equity Research Platform V11.4",
+    page_title="AI Equity Research Platform V11.5",
     layout="wide"
 )
 
-st.title("🚀 AI Equity Research Platform V11.4")
+st.title("🚀 AI Equity Research Platform V11.5")
 
 # =========================================================
 # BENCHMARK MAP
@@ -66,6 +65,7 @@ benchmark_ticker = BENCHMARKS[benchmark_name]
 def fetch_data(ticker, years=5):
 
     try:
+
         df = yf.download(
             ticker,
             period=f"{years}y",
@@ -76,13 +76,11 @@ def fetch_data(ticker, years=5):
         if df is None or len(df) == 0:
             return None
 
-        # FIX MULTIINDEX
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
 
         df = df.copy()
 
-        # ENSURE NUMERIC
         for col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
@@ -107,7 +105,7 @@ def compute_metrics(df, benchmark_df):
         df = df.copy()
         benchmark_df = benchmark_df.copy()
 
-        # INDICATORS
+        # TECHNICALS
         df["SMA50"] = df["Close"].rolling(50).mean()
         df["SMA200"] = df["Close"].rolling(200).mean()
 
@@ -127,21 +125,19 @@ def compute_metrics(df, benchmark_df):
             (df["Close"] / df["Close"].shift(20)) - 1
         ) * 100
 
-        # ALIGN BENCHMARK
-        aligned_benchmark = benchmark_df.reindex(df.index)
-
-        aligned_benchmark["Returns"] = (
-            aligned_benchmark["Close"].pct_change()
-        )
-
+        # RETURNS
         df["Returns"] = df["Close"].pct_change()
+
+        benchmark_df["Returns"] = (
+            benchmark_df["Close"].pct_change()
+        )
 
         stock_ret = (
             (1 + df["Returns"].dropna()).prod() - 1
         )
 
         benchmark_ret = (
-            (1 + aligned_benchmark["Returns"].dropna()).prod() - 1
+            (1 + benchmark_df["Returns"].dropna()).prod() - 1
         )
 
         rel_strength = (
@@ -223,12 +219,17 @@ def market_is_positive(benchmark_df):
         benchmark_df["Close"].rolling(200).mean()
     )
 
+    benchmark_df.dropna(inplace=True)
+
     latest = benchmark_df.iloc[-1]
 
-    return float(latest["Close"]) > float(latest["SMA200"])
+    return (
+        float(latest["Close"]) >
+        float(latest["SMA200"])
+    )
 
 # =========================================================
-# SCREENER MODE
+# SCREENER
 # =========================================================
 
 if mode == "📊 Screener":
@@ -243,24 +244,35 @@ if mode == "📊 Screener":
             if x.strip()
         ]
 
-        benchmark_df = fetch_data(benchmark_ticker, years)
+        benchmark_df = fetch_data(
+            benchmark_ticker,
+            years
+        )
 
         if benchmark_df is None:
-            st.error("Benchmark failed")
+            st.error("Benchmark unavailable")
             st.stop()
 
-        market_ok = market_is_positive(benchmark_df)
+        market_ok = market_is_positive(
+            benchmark_df
+        )
 
         rows = []
 
         for ticker in tickers:
 
-            df = fetch_data(ticker, years)
+            df = fetch_data(
+                ticker,
+                years
+            )
 
             if df is None:
                 continue
 
-            metrics = compute_metrics(df, benchmark_df)
+            metrics = compute_metrics(
+                df,
+                benchmark_df
+            )
 
             if metrics is None:
                 continue
@@ -268,8 +280,10 @@ if mode == "📊 Screener":
             recommendation = metrics["Recommendation"]
 
             if not market_ok:
+
                 if recommendation == "BUY":
                     recommendation = "HOLD (Market Weak)"
+
                 elif recommendation == "HOLD":
                     recommendation = "AVOID (Market Weak)"
 
@@ -285,6 +299,7 @@ if mode == "📊 Screener":
             })
 
         if len(rows) == 0:
+
             st.warning("No valid stocks found")
 
         else:
@@ -302,7 +317,7 @@ if mode == "📊 Screener":
             )
 
 # =========================================================
-# SINGLE STOCK MODE
+# SINGLE STOCK
 # =========================================================
 
 elif mode == "🔍 Single Stock":
@@ -311,21 +326,35 @@ elif mode == "🔍 Single Stock":
 
     if st.button("Analyze Stock"):
 
-        ticker = ticker_input.split(",")[0].strip().upper()
+        ticker = (
+            ticker_input
+            .split(",")[0]
+            .strip()
+            .upper()
+        )
 
-        benchmark_df = fetch_data(benchmark_ticker, years)
+        benchmark_df = fetch_data(
+            benchmark_ticker,
+            years
+        )
 
-        df = fetch_data(ticker, years)
+        df = fetch_data(
+            ticker,
+            years
+        )
 
         if df is None:
-            st.error("Stock data unavailable")
+            st.error("Stock unavailable")
             st.stop()
 
         if benchmark_df is None:
             st.error("Benchmark unavailable")
             st.stop()
 
-        metrics = compute_metrics(df, benchmark_df)
+        metrics = compute_metrics(
+            df,
+            benchmark_df
+        )
 
         if metrics is None:
             st.error("Could not compute metrics")
@@ -333,10 +362,25 @@ elif mode == "🔍 Single Stock":
 
         c1, c2, c3, c4 = st.columns(4)
 
-        c1.metric("Price", metrics["Price"])
-        c2.metric("RSI", metrics["RSI"])
-        c3.metric("Momentum %", metrics["Momentum"])
-        c4.metric("Rel Strength %", metrics["RelStrength"])
+        c1.metric(
+            "Price",
+            metrics["Price"]
+        )
+
+        c2.metric(
+            "RSI",
+            metrics["RSI"]
+        )
+
+        c3.metric(
+            "Momentum %",
+            metrics["Momentum"]
+        )
+
+        c4.metric(
+            "Rel Strength %",
+            metrics["RelStrength"]
+        )
 
         st.markdown(
             f"## Recommendation: {metrics['Recommendation']}"
@@ -345,12 +389,12 @@ elif mode == "🔍 Single Stock":
         st.write(metrics["Thesis"])
 
 # =========================================================
-# BACKTEST MODE
+# BACKTEST
 # =========================================================
 
 elif mode == "📈 Backtest":
 
-    st.subheader("📈 Strategy Backtest")
+    st.subheader("📈 Backtest")
 
     if st.button("Run Backtest"):
 
@@ -360,50 +404,58 @@ elif mode == "📈 Backtest":
             if x.strip()
         ]
 
-        benchmark_df = fetch_data(benchmark_ticker, years)
+        benchmark_df = fetch_data(
+            benchmark_ticker,
+            years
+        )
 
         if benchmark_df is None:
             st.error("Benchmark unavailable")
             st.stop()
 
         benchmark_df["Returns"] = (
-            benchmark_df["Close"].pct_change().fillna(0)
+            benchmark_df["Close"]
+            .pct_change()
+            .fillna(0)
         )
 
-        benchmark_df["SMA200"] = (
-            benchmark_df["Close"].rolling(200).mean()
-        )
-
-        benchmark_df = benchmark_df.dropna()
-
-        portfolio_returns = []
+        strategy_returns = []
 
         for ticker in tickers:
 
-            df = fetch_data(ticker, years)
+            df = fetch_data(
+                ticker,
+                years
+            )
 
             if df is None:
                 continue
 
-            metrics = compute_metrics(df, benchmark_df)
+            metrics = compute_metrics(
+                df,
+                benchmark_df
+            )
 
             if metrics is None:
                 continue
 
-            signal = 1 if metrics["Score"] >= 50 else 0
+            signal = (
+                1 if metrics["Score"] >= 50 else 0
+            )
 
-            strat_returns = (
+            strat_ret = (
                 metrics["Returns"] * signal
             )
 
-            portfolio_returns.append(strat_returns)
+            strategy_returns.append(strat_ret)
 
-        if len(portfolio_returns) == 0:
-            st.error("No valid stocks for backtest")
+        if len(strategy_returns) == 0:
+
+            st.error("No valid stocks")
             st.stop()
 
         combined = pd.concat(
-            portfolio_returns,
+            strategy_returns,
             axis=1
         ).mean(axis=1)
 
@@ -418,14 +470,20 @@ elif mode == "📈 Backtest":
         ).cumprod()
 
         # ALIGN
-        common_index = strategy_curve.index.intersection(
-            benchmark_curve.index
+        common_index = (
+            strategy_curve.index.intersection(
+                benchmark_curve.index
+            )
         )
 
-        strategy_curve = strategy_curve.loc[common_index]
-        benchmark_curve = benchmark_curve.loc[common_index]
+        strategy_curve = (
+            strategy_curve.loc[common_index]
+        )
 
-        # RETURNS
+        benchmark_curve = (
+            benchmark_curve.loc[common_index]
+        )
+
         strategy_return = (
             (strategy_curve.iloc[-1] - 1) * 100
         )
@@ -434,34 +492,12 @@ elif mode == "📈 Backtest":
             (benchmark_curve.iloc[-1] - 1) * 100
         )
 
-        # CHART
-        fig = go.Figure()
+        chart_df = pd.DataFrame({
+            "Strategy": strategy_curve,
+            benchmark_name: benchmark_curve
+        })
 
-        fig.add_trace(
-            go.Scatter(
-                x=strategy_curve.index,
-                y=strategy_curve.values,
-                name="Strategy"
-            )
-        )
-
-        fig.add_trace(
-            go.Scatter(
-                x=benchmark_curve.index,
-                y=benchmark_curve.values,
-                name=benchmark_name
-            )
-        )
-
-        fig.update_layout(
-            title="Strategy vs Benchmark",
-            height=600
-        )
-
-        st.plotly_chart(
-            fig,
-            use_container_width=True
-        )
+        st.line_chart(chart_df)
 
         c1, c2 = st.columns(2)
 
