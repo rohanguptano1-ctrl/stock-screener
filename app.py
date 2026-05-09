@@ -9,14 +9,14 @@ import plotly.graph_objects as go
 # =========================================================
 
 st.set_page_config(
-    page_title="AI Equity Research Platform V16.1",
+    page_title="AI Equity Research Platform V16.2",
     layout="wide"
 )
 
-st.title("🚀 AI Equity Research Platform V16.1")
+st.title("🚀 AI Equity Research Platform V16.2")
 
 # =========================================================
-# HELPERS
+# DATA FETCH
 # =========================================================
 
 @st.cache_data
@@ -29,19 +29,33 @@ def fetch_data(ticker, period="5y"):
         progress=False
     )
 
+    if df.empty:
+        return pd.DataFrame()
+
+    # FIX MULTIINDEX ISSUES
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+
+    df = df[["Close"]].copy()
+
     df.dropna(inplace=True)
 
     return df
 
 
+# =========================================================
+# METRICS ENGINE
+# =========================================================
+
 def compute_metrics(df, benchmark_df):
 
-    close = df["Close"]
+    close = df["Close"].copy()
 
     sma50 = close.rolling(50).mean()
 
     sma200 = close.rolling(200).mean()
 
+    # RSI
     delta = close.diff()
 
     gain = delta.clip(lower=0)
@@ -56,22 +70,33 @@ def compute_metrics(df, benchmark_df):
 
     rsi = 100 - (100 / (1 + rs))
 
+    # MOMENTUM
     momentum = (
-        (close.iloc[-1] / close.iloc[-63]) - 1
+        (
+            close.iloc[-1]
+            /
+            close.iloc[-63]
+        ) - 1
     ) * 100
+
+    # BENCHMARK RETURN
+    benchmark_close = benchmark_df["Close"]
 
     benchmark_return = (
-        benchmark_df["Close"].iloc[-1]
-        /
-        benchmark_df["Close"].iloc[-63]
-        - 1
+        (
+            benchmark_close.iloc[-1]
+            /
+            benchmark_close.iloc[-63]
+        ) - 1
     ) * 100
 
+    # STOCK RETURN
     stock_return = (
-        close.iloc[-1]
-        /
-        close.iloc[-63]
-        - 1
+        (
+            close.iloc[-1]
+            /
+            close.iloc[-63]
+        ) - 1
     ) * 100
 
     relative_strength = (
@@ -84,15 +109,19 @@ def compute_metrics(df, benchmark_df):
         * 100
     )
 
+    # =====================================================
+    # SCORE
+    # =====================================================
+
     score = 0
 
-    if close.iloc[-1] > sma200.iloc[-1]:
+    if float(close.iloc[-1]) > float(sma200.iloc[-1]):
         score += 30
 
-    if sma50.iloc[-1] > sma200.iloc[-1]:
+    if float(sma50.iloc[-1]) > float(sma200.iloc[-1]):
         score += 25
 
-    if rsi.iloc[-1] > 55:
+    if float(rsi.iloc[-1]) > 55:
         score += 20
 
     if momentum > 0:
@@ -122,28 +151,29 @@ def compute_metrics(df, benchmark_df):
     # =====================================================
 
     if (
-        close.iloc[-1] > sma200.iloc[-1]
-        and sma50.iloc[-1] > sma200.iloc[-1]
+        float(close.iloc[-1]) > float(sma200.iloc[-1])
+        and
+        float(sma50.iloc[-1]) > float(sma200.iloc[-1])
     ):
         structure = "Bullish Structure"
 
-    elif close.iloc[-1] > sma200.iloc[-1]:
+    elif float(close.iloc[-1]) > float(sma200.iloc[-1]):
         structure = "Early Accumulation"
 
     else:
         structure = "Bearish Structure"
 
     return {
-        "Price": round(close.iloc[-1], 2),
-        "RSI": round(rsi.iloc[-1], 2),
-        "Momentum": round(momentum, 2),
-        "RelativeStrength": round(relative_strength, 2),
-        "Volatility": round(volatility, 2),
-        "SMA50": round(sma50.iloc[-1], 2),
-        "SMA200": round(sma200.iloc[-1], 2),
+        "Price": round(float(close.iloc[-1]), 2),
+        "RSI": round(float(rsi.iloc[-1]), 2),
+        "Momentum": round(float(momentum), 2),
+        "RelativeStrength": round(float(relative_strength), 2),
+        "Volatility": round(float(volatility), 2),
+        "SMA50": round(float(sma50.iloc[-1]), 2),
+        "SMA200": round(float(sma200.iloc[-1]), 2),
         "Recommendation": recommendation,
         "Structure": structure,
-        "Score": score
+        "Score": int(score)
     }
 
 
@@ -171,7 +201,7 @@ if st.button("Run Screener"):
         for x in ticker_input.split(",")
     ]
 
-    rows = []
+    screener_rows = []
 
     for ticker in tickers:
 
@@ -179,12 +209,15 @@ if st.button("Run Screener"):
 
             df = fetch_data(ticker)
 
+            if len(df) < 250:
+                continue
+
             metrics = compute_metrics(
                 df,
                 benchmark_df
             )
 
-            rows.append({
+            screener_rows.append({
                 "Ticker": ticker,
                 "Score": metrics["Score"],
                 "Recommendation": metrics["Recommendation"],
@@ -198,17 +231,25 @@ if st.button("Run Screener"):
         except:
             pass
 
-    screener_df = pd.DataFrame(rows)
+    if len(screener_rows) > 0:
 
-    screener_df = screener_df.sort_values(
-        by="Score",
-        ascending=False
-    )
+        screener_df = pd.DataFrame(screener_rows)
 
-    st.dataframe(
-        screener_df,
-        use_container_width=True
-    )
+        screener_df = screener_df.sort_values(
+            by="Score",
+            ascending=False
+        )
+
+        st.dataframe(
+            screener_df,
+            use_container_width=True
+        )
+
+    else:
+
+        st.error(
+            "No valid stock data fetched."
+        )
 
 # =========================================================
 # PORTFOLIO BACKTEST
@@ -241,18 +282,9 @@ if st.button("Run Portfolio Backtest"):
         .fillna(0)
     )
 
-    # =====================================================
-    # FIXED BUG HERE
-    # =====================================================
+    portfolio_returns = []
 
-    benchmark_returns = benchmark_returns[
-        benchmark_returns.index >= (
-            benchmark_returns.index.max()
-            - pd.DateOffset(years=years)
-        )
-    ]
-
-    portfolio_data = []
+    selected_tickers = []
 
     for ticker in tickers:
 
@@ -266,75 +298,30 @@ if st.button("Run Portfolio Backtest"):
             if len(df) < 250:
                 continue
 
-            metrics = compute_metrics(
-                df,
-                benchmark_df
+            selected_tickers.append(ticker)
+
+            returns = (
+                df["Close"]
+                .pct_change()
+                .fillna(0)
             )
 
-            portfolio_data.append({
-                "Ticker": ticker,
-                "Score": metrics["Score"],
-                "DF": df
-            })
+            portfolio_returns.append(returns)
 
         except:
             pass
 
-    # =====================================================
-    # RANK PORTFOLIO
-    # =====================================================
+    if len(portfolio_returns) > 0:
 
-    portfolio_data = sorted(
-        portfolio_data,
-        key=lambda x: x["Score"],
-        reverse=True
-    )
-
-    # =====================================================
-    # TOP 3 STOCKS
-    # =====================================================
-
-    top_portfolio = portfolio_data[:3]
-
-    selected = []
-
-    strategy_returns = None
-
-    for item in top_portfolio:
-
-        ticker = item["Ticker"]
-
-        df = item["DF"]
-
-        selected.append(ticker)
-
-        returns = (
-            df["Close"]
-            .pct_change()
-            .fillna(0)
+        aligned_returns = pd.concat(
+            portfolio_returns,
+            axis=1
         )
 
-        returns = returns.reindex(
-            benchmark_returns.index
-        ).fillna(0)
-
-        if strategy_returns is None:
-
-            strategy_returns = returns.copy()
-
-        else:
-
-            strategy_returns = strategy_returns.add(
-                returns,
-                fill_value=0
-            )
-
-    if strategy_returns is not None:
+        aligned_returns.columns = selected_tickers
 
         strategy_returns = (
-            strategy_returns
-            /
-            len(selected)
+            aligned_returns.mean(axis=1)
         )
 
         strategy_curve = (
@@ -342,7 +329,9 @@ if st.button("Run Portfolio Backtest"):
         ).cumprod()
 
         benchmark_curve = (
-            1 + benchmark_returns
+            1 + benchmark_returns.reindex(
+                strategy_curve.index
+            ).fillna(0)
         ).cumprod()
 
         # =================================================
@@ -400,11 +389,14 @@ if st.button("Run Portfolio Backtest"):
             strategy_returns < 0
         ]
 
-        sortino = (
-            strategy_returns.mean()
-            /
-            downside.std()
-        ) * np.sqrt(252)
+        if downside.std() != 0:
+            sortino = (
+                strategy_returns.mean()
+                /
+                downside.std()
+            ) * np.sqrt(252)
+        else:
+            sortino = 0
 
         rolling_max = (
             strategy_curve.cummax()
@@ -456,14 +448,14 @@ if st.button("Run Portfolio Backtest"):
         )
 
         # =================================================
-        # SELECTED PORTFOLIO
+        # PORTFOLIO TABLE
         # =================================================
 
         st.subheader("Selected Portfolio")
 
         st.dataframe(
             pd.DataFrame({
-                "Ticker": selected
+                "Ticker": selected_tickers
             }),
             use_container_width=True
         )
@@ -498,6 +490,12 @@ if st.button("Run Portfolio Backtest"):
                 "Risk-adjusted returns appear moderate."
             )
 
+    else:
+
+        st.error(
+            "No valid portfolio data fetched."
+        )
+
 # =========================================================
 # SINGLE STOCK ANALYSIS
 # =========================================================
@@ -513,221 +511,253 @@ if st.button("Analyze Stock"):
 
     df = fetch_data(single_ticker)
 
-    metrics = compute_metrics(
-        df,
-        benchmark_df
-    )
+    if len(df) < 250:
 
-    close = df["Close"]
+        st.error("Not enough stock data.")
 
-    sma50 = close.rolling(50).mean()
+    else:
 
-    sma200 = close.rolling(200).mean()
-
-    st.subheader(
-        f"Recommendation: {metrics['Recommendation']}"
-    )
-
-    c1, c2, c3, c4 = st.columns(4)
-
-    c1.metric(
-        "RSI",
-        metrics["RSI"]
-    )
-
-    c2.metric(
-        "Momentum %",
-        metrics["Momentum"]
-    )
-
-    c3.metric(
-        "Relative Strength %",
-        metrics["RelativeStrength"]
-    )
-
-    c4.metric(
-        "Volatility %",
-        metrics["Volatility"]
-    )
-
-    # =====================================================
-    # PRICE CHART
-    # =====================================================
-
-    st.subheader("📉 Price Chart")
-
-    fig = go.Figure()
-
-    fig.add_trace(
-        go.Scatter(
-            x=df.index,
-            y=close,
-            name="Close"
+        metrics = compute_metrics(
+            df,
+            benchmark_df
         )
-    )
 
-    fig.add_trace(
-        go.Scatter(
-            x=df.index,
-            y=sma50,
-            name="SMA50"
+        close = df["Close"]
+
+        sma50 = close.rolling(50).mean()
+
+        sma200 = close.rolling(200).mean()
+
+        st.subheader(
+            f"Recommendation: {metrics['Recommendation']}"
         )
-    )
 
-    fig.add_trace(
-        go.Scatter(
-            x=df.index,
-            y=sma200,
-            name="SMA200"
+        c1, c2, c3, c4 = st.columns(4)
+
+        c1.metric(
+            "RSI",
+            metrics["RSI"]
         )
-    )
 
-    st.plotly_chart(
-        fig,
-        use_container_width=True
-    )
+        c2.metric(
+            "Momentum %",
+            metrics["Momentum"]
+        )
 
-    # =====================================================
-    # WRITEUP
-    # =====================================================
+        c3.metric(
+            "Relative Strength %",
+            metrics["RelativeStrength"]
+        )
 
-    st.subheader("🧠 AI Investment Writeup")
+        c4.metric(
+            "Volatility %",
+            metrics["Volatility"]
+        )
 
-    st.info(
-        f"""
+        # =================================================
+        # PRICE CHART
+        # =================================================
+
+        st.subheader("📉 Price Chart")
+
+        fig = go.Figure()
+
+        fig.add_trace(
+            go.Scatter(
+                x=df.index,
+                y=close,
+                name="Close"
+            )
+        )
+
+        fig.add_trace(
+            go.Scatter(
+                x=df.index,
+                y=sma50,
+                name="SMA50"
+            )
+        )
+
+        fig.add_trace(
+            go.Scatter(
+                x=df.index,
+                y=sma200,
+                name="SMA200"
+            )
+        )
+
+        st.plotly_chart(
+            fig,
+            use_container_width=True
+        )
+
+        # =================================================
+        # PATTERN ANALYSIS
+        # =================================================
+
+        st.subheader("📈 Chart Pattern Analysis")
+
+        if metrics["SMA50"] > metrics["SMA200"]:
+
+            st.success(
+                "Bullish moving average structure visible with SMA50 above SMA200."
+            )
+
+        else:
+
+            st.warning(
+                "Bearish moving average structure visible with SMA50 below SMA200."
+            )
+
+        if metrics["Momentum"] > 0:
+
+            st.success(
+                "Momentum profile suggests bullish continuation."
+            )
+
+        else:
+
+            st.warning(
+                "Momentum profile suggests consolidation or correction phase."
+            )
+
+        # =================================================
+        # WRITEUP
+        # =================================================
+
+        st.subheader("🧠 AI Investment Writeup")
+
+        st.info(
+            f"""
 The stock currently exhibits a **{metrics['Structure']}** setup.
 
 Current framework recommendation:
 ### {metrics['Recommendation']}
 """
-    )
-
-    st.subheader("✅ Bullish Factors")
-
-    bullish = []
-
-    if metrics["Price"] > metrics["SMA200"]:
-        bullish.append(
-            "Price remains above 200DMA indicating long-term institutional support."
         )
 
-    if metrics["RelativeStrength"] > 0:
-        bullish.append(
-            "Stock is outperforming benchmark index."
+        # =================================================
+        # BULLISH FACTORS
+        # =================================================
+
+        st.subheader("✅ Bullish Factors")
+
+        bullish = []
+
+        if metrics["Price"] > metrics["SMA200"]:
+
+            bullish.append(
+                "Price remains above 200DMA indicating long-term institutional support."
+            )
+
+        if metrics["RelativeStrength"] > 0:
+
+            bullish.append(
+                "Stock is outperforming benchmark index."
+            )
+
+        if metrics["RSI"] > 55:
+
+            bullish.append(
+                "RSI remains healthy and supportive of bullish continuation."
+            )
+
+        if len(bullish) == 0:
+
+            bullish.append(
+                "No major bullish technical factors currently visible."
+            )
+
+        for item in bullish:
+
+            st.write("•", item)
+
+        # =================================================
+        # RISK FACTORS
+        # =================================================
+
+        st.subheader("⚠️ Risk Factors")
+
+        risks = []
+
+        if metrics["SMA50"] < metrics["SMA200"]:
+
+            risks.append(
+                "SMA50 remains below SMA200 indicating weak medium-term momentum."
+            )
+
+        if metrics["Momentum"] < 0:
+
+            risks.append(
+                "Momentum remains negative suggesting near-term selling pressure."
+            )
+
+        if len(risks) == 0:
+
+            risks.append(
+                "No major technical weakness currently visible."
+            )
+
+        for item in risks:
+
+            st.write("•", item)
+
+        # =================================================
+        # PROBABILITY TABLE
+        # =================================================
+
+        st.subheader("🎯 Probability Scenarios")
+
+        scenario_df = pd.DataFrame({
+            "Scenario": [
+                "Bullish Continuation",
+                "Sideways Consolidation",
+                "Bearish Breakdown"
+            ],
+            "Probability": [
+                "45%",
+                "35%",
+                "20%"
+            ]
+        })
+
+        st.dataframe(
+            scenario_df,
+            use_container_width=True
         )
 
-    if metrics["RSI"] > 55:
-        bullish.append(
-            "RSI remains healthy and supportive of bullish continuation."
-        )
+        # =================================================
+        # WHAT TO WATCH
+        # =================================================
 
-    for x in bullish:
-        st.write("•", x)
+        st.subheader("👀 What To Watch Next")
 
-    st.subheader("⚠️ Risk Factors")
+        watch_items = []
 
-    risks = []
+        if metrics["Momentum"] < 0:
 
-    if metrics["SMA50"] < metrics["SMA200"]:
-        risks.append(
-            "SMA50 remains below SMA200 indicating weak medium-term momentum."
-        )
+            watch_items.append(
+                "Watch whether momentum turns positive in coming weeks."
+            )
 
-    if metrics["Momentum"] < 0:
-        risks.append(
-            "Momentum remains negative suggesting near-term selling pressure."
-        )
+        if metrics["SMA50"] < metrics["SMA200"]:
 
-    if not risks:
-        risks.append(
-            "No major technical weakness currently visible."
-        )
+            watch_items.append(
+                "Watch for SMA50 crossing above SMA200."
+            )
 
-    for x in risks:
-        st.write("•", x)
+        if metrics["RSI"] > 70:
 
-    # =====================================================
-    # PATTERN ANALYSIS
-    # =====================================================
+            watch_items.append(
+                "RSI approaching overheated territory."
+            )
 
-    st.subheader("📉 Chart Pattern Analysis")
+        if len(watch_items) == 0:
 
-    patterns = []
+            watch_items.append(
+                "Trend structure currently remains healthy."
+            )
 
-    if metrics["SMA50"] > metrics["SMA200"]:
-        patterns.append(
-            "Bullish moving average structure visible with SMA50 above SMA200."
-        )
+        for item in watch_items:
 
-    else:
-        patterns.append(
-            "Bearish moving average structure visible with SMA50 below SMA200."
-        )
-
-    if metrics["Momentum"] > 0:
-        patterns.append(
-            "Momentum profile suggests trend continuation."
-        )
-
-    else:
-        patterns.append(
-            "Momentum profile suggests consolidation or correction phase."
-        )
-
-    for p in patterns:
-        st.write("•", p)
-
-    # =====================================================
-    # PROBABILITY TABLE
-    # =====================================================
-
-    st.subheader("🎯 Probability Scenarios")
-
-    scenario_df = pd.DataFrame({
-        "Scenario": [
-            "Bullish Continuation",
-            "Sideways Consolidation",
-            "Bearish Breakdown"
-        ],
-        "Probability": [
-            "45%",
-            "35%",
-            "20%"
-        ]
-    })
-
-    st.dataframe(
-        scenario_df,
-        use_container_width=True
-    )
-
-    # =====================================================
-    # WATCHLIST
-    # =====================================================
-
-    st.subheader("👀 What To Watch Next")
-
-    watch_items = []
-
-    if metrics["Momentum"] < 0:
-        watch_items.append(
-            "Watch whether momentum turns positive in coming weeks."
-        )
-
-    if metrics["SMA50"] < metrics["SMA200"]:
-        watch_items.append(
-            "Watch for SMA50 crossing above SMA200."
-        )
-
-    if metrics["RSI"] > 70:
-        watch_items.append(
-            "RSI approaching overheated territory."
-        )
-
-    if not watch_items:
-        watch_items.append(
-            "Trend structure currently remains healthy."
-        )
-
-    for item in watch_items:
-        st.write("•", item)
+            st.write("•", item)
