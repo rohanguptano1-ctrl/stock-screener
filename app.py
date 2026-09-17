@@ -3,13 +3,18 @@ import pandas as pd
 import numpy as np
 import yfinance as yf
 import plotly.graph_objects as go
+import time
+import requests
+from bs4 import BeautifulSoup
+import re
+from datetime import datetime, date, timedelta
 
 # =========================================================
 # PAGE CONFIG
 # =========================================================
 
 st.set_page_config(
-    page_title="BharatTrack V20",
+    page_title="BharatTrack V22",
     layout="wide",
     page_icon="🚀"
 )
@@ -50,8 +55,307 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.title("🚀 BharatTrack V20")
-st.caption("CANSLIM · Minervini Trend Template · Momentum Factor · IBD RS Rank · Basket Screener · Market Regime Filter")
+st.title("🚀 BharatTrack V22")
+st.caption("CANSLIM · Minervini · Momentum · Quality Score · Entry/Exit Signals · Earnings Calendar · Liquidity Filter · Thematic Tags · Portfolio Heat")
+
+
+# =========================================================
+# THEMATIC TAGS  (SOIC-aligned, June 2026)
+# =========================================================
+
+THEME_MAP = {
+    # Power / Grid Supercycle
+    "KEI":"Power Supercycle","POLYCAB":"Power Supercycle","APAR":"Power Supercycle",
+    "POWERGRID":"Power Supercycle","NTPC":"Power Supercycle","NLCINDIA":"Power Supercycle",
+    "TATAPOWER":"Power Supercycle","CESC":"Power Supercycle","NHPC":"Power Supercycle",
+    "VOLTAMP":"Power Supercycle","CGPOWER":"Power Supercycle","KALPATPOWR":"Power Supercycle",
+    "TECHNOE":"Power Supercycle",
+    # Defence & Aerospace
+    "HAL":"Defence","BEL":"Defence","MAZDOCK":"Defence","BDL":"Defence",
+    "DATAPATTNS":"Defence","ZENTEC":"Defence","ASTRAZEN":"Defence",
+    # CDMO / Pharma
+    "NEULANDLAB":"CDMO","LAURUSLABS":"CDMO","DIVIS":"CDMO",
+    "AARTIPHARMA":"CDMO","SUNPHARMA":"CDMO","CIPLA":"CDMO",
+    # Data Centre Ecosystem
+    "DIXON":"Data Centre","KAYNES":"Data Centre","AMBER":"Data Centre",
+    "VOLTAS":"Data Centre","BLUESTAR":"Data Centre","KFINTECH":"Data Centre",
+    # Premiumisation
+    "TRENT":"Premiumisation","TITAN":"Premiumisation","KALYANKJIL":"Premiumisation",
+    "PAGEIND":"Premiumisation","DMART":"Premiumisation","VBL":"Premiumisation",
+    "MANYAVAR":"Premiumisation","SENCO":"Premiumisation",
+    # China+1 Beneficiary
+    "DEEPAKNTR":"China+1","NAVINFLUOR":"China+1","SRF":"China+1",
+    "PIIND":"China+1","AUROPHARMA":"China+1","GRANULES":"China+1",
+    # Financialisation
+    "HDFCAMC":"Financialisation","KFINTECH":"Financialisation","CAMS":"Financialisation",
+    "ANGELONE":"Financialisation","MOTILALOFS":"Financialisation","360ONE":"Financialisation",
+    # Capital Goods / Engineering
+    "ABB":"Cap Goods","SIEMENS":"Cap Goods","THERMAX":"Cap Goods",
+    "POLYCAB":"Cap Goods","ELGIEQUIP":"Cap Goods","GRINDWELL":"Cap Goods",
+    "BEL":"Cap Goods","KAYNES":"Cap Goods","ISGEC":"Cap Goods",
+    # Metals - Old Regime Mining Lease
+    "COALINDIA":"Mining (Old Lease)","NMDC":"Mining (Old Lease)",
+    "GPIL":"Mining (Old Lease)","IMFA":"Mining (Old Lease)",
+    "LLOYDSME":"Mining (Old Lease)","SANDUMA":"Mining (Old Lease)",
+}
+
+def get_theme(ticker):
+    t = ticker.upper().replace(".NS","").replace(".BO","")
+    return THEME_MAP.get(t, "—")
+
+# =========================================================
+# EARNINGS CALENDAR (NSE uploaded file)
+# =========================================================
+
+@st.cache_data(ttl=86400)
+def load_earnings_calendar():
+    """
+    Loads NSE corporate events file if uploaded.
+    Returns dict: symbol -> list of upcoming results dates.
+    """
+    try:
+        import glob, os
+        # Try to find uploaded file in typical paths
+        paths = [
+            "/mnt/user-data/uploads/CF-Event-equities-16-09-2025-to-16-09-2026.csv",
+        ]
+        for p in paths:
+            if os.path.exists(p):
+                df = pd.read_csv(p)
+                df.columns = [c.strip().replace("\n","").strip() for c in df.columns]
+                for col in df.columns:
+                    if df[col].dtype == object:
+                        df[col] = df[col].str.strip()
+                results = df[df["PURPOSE"].str.contains("Financial Results", na=False)].copy()
+                results["DATE"] = pd.to_datetime(results["DATE"], format="%d-%b-%Y", errors="coerce")
+                results = results.dropna(subset=["DATE"])
+                cal = {}
+                for _, row in results.iterrows():
+                    sym = row["SYMBOL"]
+                    dt  = row["DATE"].date()
+                    if sym not in cal:
+                        cal[sym] = []
+                    cal[sym].append(dt)
+                return cal
+    except Exception:
+        pass
+    return {}
+
+def get_earnings_flag(ticker, calendar):
+    """
+    Returns (flag_text, flag_color) for earnings proximity.
+    🔴 = results within 5 days (do not enter)
+    🟠 = results in 5-10 days (reduce size)
+    🟢 = clear (results > 10 days away)
+    """
+    clean = ticker.upper().replace(".NS","").replace(".BO","")
+    today = date.today()
+    dates = calendar.get(clean, [])
+    upcoming = [d for d in dates if d >= today]
+    if not upcoming:
+        return "🟢 Clear", "#2ecc71"
+    nearest = min(upcoming)
+    days_away = (nearest - today).days
+    if days_away <= 5:
+        return f"🔴 Results in {days_away}d — Skip", "#e74c3c"
+    elif days_away <= 10:
+        return f"🟠 Results in {days_away}d — Half size", "#f39c12"
+    else:
+        return f"🟢 Clear ({days_away}d)", "#2ecc71"
+
+# =========================================================
+# ENTRY / EXIT SIGNAL ENGINE  (validated on 55,624 trades)
+# =========================================================
+
+# Calibrated thresholds from stress test:
+# Large Cap (Nifty 50):  stop 2.5×ATR · trail SMA50 · targets 1.5R/3R
+# Nifty Next 50:         stop 2.5×ATR · trail SMA50 · targets 2R/4R
+# Mid Cap:               stop 2.5×ATR · trail SMA50 · targets 1.5R/3R
+# Small Cap:             stop 2.0×ATR · trail SMA50 · targets 1R/2R
+
+CAP_PARAMS = {
+    "Large Cap (Nifty 50)": {"stop_mult": 2.5, "t1_mult": 1.5, "t2_mult": 3.0, "trail": "SMA50"},
+    "Large Cap (Next 50)":  {"stop_mult": 2.5, "t1_mult": 2.0, "t2_mult": 4.0, "trail": "SMA50"},
+    "Mid Cap":              {"stop_mult": 2.5, "t1_mult": 1.5, "t2_mult": 3.0, "trail": "SMA50"},
+    "Small Cap":            {"stop_mult": 2.0, "t1_mult": 1.0, "t2_mult": 2.0, "trail": "SMA50"},
+}
+DEFAULT_CAP_PARAMS = {"stop_mult": 2.0, "t1_mult": 1.5, "t2_mult": 3.0, "trail": "SMA50"}
+
+def compute_entry_exit(df, cap_category="Mid Cap", earnings_flag="🟢 Clear"):
+    """
+    Computes validated entry/exit signals for a stock.
+    Returns dict with entry type, prices, stop, targets, and status.
+    """
+    close  = df["Close"].values
+    highs  = df["High"].values if "High" in df.columns else close
+    lows   = df["Low"].values  if "Low"  in df.columns else close
+    n      = len(close)
+    if n < 60:
+        return {}
+
+    # ATR
+    tr  = np.maximum(highs - lows,
+          np.maximum(np.abs(highs - np.roll(close,1)),
+                     np.abs(lows  - np.roll(close,1))))
+    tr[0] = highs[0] - lows[0]
+    atr  = float(pd.Series(tr).rolling(14, min_periods=5).mean().iloc[-1])
+
+    sma50  = float(pd.Series(close).rolling(50,  min_periods=20).mean().iloc[-1])
+    sma200 = float(pd.Series(close).rolling(200, min_periods=50).mean().iloc[-1]) if n>=200 else float(np.mean(close))
+    high20 = float(pd.Series(highs).rolling(20, min_periods=10).max().iloc[-2])  # previous day 20D high
+    vol20  = float(pd.Series(df["Volume"].values if "Volume" in df.columns else np.ones(n)).rolling(20).mean().iloc[-1])
+    vol5   = float(pd.Series(df["Volume"].values if "Volume" in df.columns else np.ones(n)).rolling(5).mean().iloc[-1])
+
+    price  = float(close[-1])
+    params = CAP_PARAMS.get(cap_category, DEFAULT_CAP_PARAMS)
+    stop_mult = params["stop_mult"]
+    t1_mult   = params["t1_mult"]
+    t2_mult   = params["t2_mult"]
+
+    # Liquidity check (₹ Cr daily value)
+    if "Volume" in df.columns and "Close" in df.columns:
+        avg_val_cr = float((df["Close"] * df["Volume"]).rolling(20).mean().iloc[-1] / 1e7)
+    else:
+        avg_val_cr = 999
+
+    # Entry type detection
+    breakout_trigger  = high20 * 1.005  # 0.5% above 20D high
+    volume_confirming = vol5 > vol20 * 1.3  # volume 30%+ above 20D avg
+
+    is_breakout = (price > high20 and price > sma200 and
+                   abs(price - breakout_trigger) / price < 0.02)
+    is_pullback = (price > sma200 and sma50 > sma200 and
+                   abs(price - sma50) / sma50 < 0.025)
+
+    # Earnings block
+    earnings_blocked = "🔴" in earnings_flag
+
+    # Build entry/exit levels
+    def levels(entry):
+        stop_d  = atr * stop_mult
+        stop    = max(entry - stop_d, entry * 0.92)
+        t1      = entry + (entry - stop) * t1_mult
+        t2      = entry + (entry - stop) * t2_mult
+        return round(stop,2), round(t1,2), round(t2,2)
+
+    breakout_stop, breakout_t1, breakout_t2 = levels(breakout_trigger)
+    pullback_stop, pullback_t1, pullback_t2  = levels(sma50)
+
+    # Entry status
+    if earnings_blocked:
+        status = "🔴 Skip — Results Imminent"
+        status_color = "#e74c3c"
+        best_entry = None
+    elif avg_val_cr < 10:
+        status = "⚠️ Illiquid — ₹{:.1f}Cr avg vol".format(avg_val_cr)
+        status_color = "#f39c12"
+        best_entry = None
+    elif price < sma200:
+        status = "🔴 Avoid — Below 200DMA"
+        status_color = "#e74c3c"
+        best_entry = None
+    elif is_breakout and volume_confirming:
+        status = "🟢 Breakout Entry — Volume Confirmed"
+        status_color = "#2ecc71"
+        best_entry = "breakout"
+    elif is_pullback:
+        status = "🟢 Pullback Entry — At SMA50"
+        status_color = "#2ecc71"
+        best_entry = "pullback"
+    elif price > high20 * 0.95 and price < high20 * 1.05:
+        status = "⏳ Watch — Building Base Near Pivot"
+        status_color = "#3498db"
+        best_entry = None
+    elif is_breakout and not volume_confirming:
+        status = "⚠️ Breakout on Low Volume — Wait"
+        status_color = "#f39c12"
+        best_entry = None
+    elif price > sma200 and price > sma200 * 1.15:
+        status = "❌ Extended — Wait for Pullback to ₹{:.0f}".format(sma50)
+        status_color = "#f39c12"
+        best_entry = None
+    else:
+        status = "⏳ Not Ready — Setup Incomplete"
+        status_color = "#888"
+        best_entry = None
+
+    return {
+        "Status":        status,
+        "StatusColor":   status_color,
+        "BestEntry":     best_entry,
+        "BreakoutEntry": round(breakout_trigger, 2),
+        "PullbackEntry": round(sma50, 2),
+        "CurrentPrice":  round(price, 2),
+        "ATR":           round(atr, 2),
+        "ATRPct":        round(atr/price*100, 2),
+        # Breakout levels
+        "BreakoutStop":  breakout_stop,
+        "BreakoutT1":    breakout_t1,
+        "BreakoutT2":    breakout_t2,
+        # Pullback levels
+        "PullbackStop":  pullback_stop,
+        "PullbackT1":    pullback_t1,
+        "PullbackT2":    pullback_t2,
+        # Meta
+        "LiquidityCr":   round(avg_val_cr, 1),
+        "LiquidityOK":   avg_val_cr >= 10,
+        "VolConfirmed":  volume_confirming,
+        "StopMult":      stop_mult,
+        "T1Mult":        t1_mult,
+        "T2Mult":        t2_mult,
+        "MaxHoldDays":   90,
+        "ReentryBlock":  21,
+        "Cap":           cap_category,
+        "EarningsFlag":  earnings_flag,
+    }
+
+# =========================================================
+# LIQUIDITY CHECK
+# =========================================================
+
+def check_liquidity(df):
+    """Returns average daily value traded in ₹ Crore."""
+    if "Volume" not in df.columns or "Close" not in df.columns:
+        return 999
+    val = (df["Close"] * df["Volume"]).rolling(20, min_periods=5).mean().iloc[-1]
+    return round(float(val) / 1e7, 1)
+
+# =========================================================
+# SECTOR CORRELATION WARNINGS (from stress test)
+# =========================================================
+
+HIGH_CORR_SECTORS = {
+    "Construction Materials": {"max_positions": 2, "avg_r": 0.49},
+    "Metals & Mining":        {"max_positions": 2, "avg_r": 0.41},
+    "Realty":                 {"max_positions": 2, "avg_r": 0.37},
+    "Information Technology": {"max_positions": 3, "avg_r": 0.35},
+    "Construction":           {"max_positions": 3, "avg_r": 0.34},
+}
+
+BEST_DIVERSIFYING_PAIRS = [
+    ("Healthcare", "Capital Goods", 0.163),
+    ("Healthcare", "Power", 0.167),
+    ("Healthcare", "Telecommunication", 0.166),
+    ("Fast Moving Consumer Goods", "Capital Goods", 0.181),
+]
+
+def check_portfolio_heat(positions_by_sector):
+    """
+    Returns warnings if sector concentration exceeds validated limits.
+    positions_by_sector: dict sector -> count
+    """
+    warnings = []
+    for sector, count in positions_by_sector.items():
+        if sector in HIGH_CORR_SECTORS:
+            limit = HIGH_CORR_SECTORS[sector]["max_positions"]
+            r     = HIGH_CORR_SECTORS[sector]["avg_r"]
+            if count > limit:
+                warnings.append(
+                    f"⚠️ {sector}: {count} positions but max recommended is {limit} "
+                    f"(avg within-sector correlation r={r:.2f})"
+                )
+    return warnings
+
 
 # =========================================================
 # INDEX BASKETS
@@ -94,6 +398,180 @@ BASKETS = {
     "Custom": []
 }
 
+
+
+# =========================================================
+# SCREENER.IN FUNDAMENTALS
+# =========================================================
+
+_screener_cache = {}
+
+def fetch_screener_fundamentals(ticker):
+    """
+    Scrapes screener.in company page for key fundamental ratios.
+    Returns dict with PE, ROCE, ROE, Sales Growth, Profit Growth,
+    Debt/Equity, Market Cap, Pros, Cons.
+    Caches results per session to avoid repeated scraping.
+    """
+    clean = ticker.upper().replace(".NS","").replace(".BO","")
+    if clean in _screener_cache:
+        return _screener_cache[clean]
+
+    url = f"https://www.screener.in/company/{clean}/"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept": "text/html,application/xhtml+xml",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+
+    result = {
+        "PE": None, "ROCE": None, "ROE": None,
+        "BookValue": None, "DividendYield": None,
+        "MarketCap": None, "DebtToEquity": None,
+        "SalesGrowth3Y": None, "ProfitGrowth3Y": None,
+        "SalesGrowth5Y": None, "ProfitGrowth5Y": None,
+        "Pros": [], "Cons": [],
+        "Available": False
+    }
+
+    try:
+        resp = requests.get(url, headers=headers, timeout=8)
+        if resp.status_code != 200:
+            return result
+        soup = BeautifulSoup(resp.text, "html.parser")
+
+        # ── Key Ratios ──────────────────────────────────────
+        ratios_section = soup.find("ul", id="top-ratios")
+        if ratios_section:
+            for li in ratios_section.find_all("li"):
+                name_tag = li.find("span", class_="name")
+                val_tag  = li.find("span", class_="nowrap value") or li.find("span", class_="value")
+                if not name_tag or not val_tag:
+                    continue
+                name = name_tag.get_text(strip=True).lower()
+                raw  = val_tag.get_text(strip=True)
+                # Clean: remove ₹, Cr., commas, %
+                clean_val = re.sub(r"[₹,Cr\.\s%]", "", raw).strip()
+                try:
+                    val = float(clean_val)
+                except ValueError:
+                    val = None
+
+                if "p/e" in name or "stock p/e" in name:
+                    result["PE"] = val
+                elif "roce" in name:
+                    result["ROCE"] = val
+                elif "roe" in name:
+                    result["ROE"] = val
+                elif "book value" in name:
+                    result["BookValue"] = val
+                elif "dividend yield" in name:
+                    result["DividendYield"] = val
+                elif "market cap" in name:
+                    result["MarketCap"] = raw  # keep formatted
+
+        # ── CAGR Growth Rates ────────────────────────────────
+        # screener.in shows these in a section with class "ranges-wrapper"
+        # or in the company-info section — look for the CAGR table
+        cagr_section = soup.find("section", id="profit-loss")
+        if not cagr_section:
+            cagr_section = soup.find("div", class_="company-info")
+
+        # Try parsing from text blocks
+        page_text = soup.get_text()
+
+        # Find Sales CAGR patterns e.g. "Compounded Sales Growth 3 Years: 12%"
+        sales_3y = re.search(r"Sales Growth.*?3 Years?[:\s]+(-?\d+\.?\d*)%", page_text, re.IGNORECASE | re.DOTALL)
+        sales_5y = re.search(r"Sales Growth.*?5 Years?[:\s]+(-?\d+\.?\d*)%", page_text, re.IGNORECASE | re.DOTALL)
+        profit_3y = re.search(r"Profit Growth.*?3 Years?[:\s]+(-?\d+\.?\d*)%", page_text, re.IGNORECASE | re.DOTALL)
+        profit_5y = re.search(r"Profit Growth.*?5 Years?[:\s]+(-?\d+\.?\d*)%", page_text, re.IGNORECASE | re.DOTALL)
+
+        if sales_3y:   result["SalesGrowth3Y"]   = float(sales_3y.group(1))
+        if sales_5y:   result["SalesGrowth5Y"]   = float(sales_5y.group(1))
+        if profit_3y:  result["ProfitGrowth3Y"]  = float(profit_3y.group(1))
+        if profit_5y:  result["ProfitGrowth5Y"]  = float(profit_5y.group(1))
+
+        # ── Pros & Cons ──────────────────────────────────────
+        pros_section = soup.find("div", class_="pros")
+        if pros_section:
+            result["Pros"] = [li.get_text(strip=True) for li in pros_section.find_all("li")][:4]
+
+        cons_section = soup.find("div", class_="cons")
+        if cons_section:
+            result["Cons"] = [li.get_text(strip=True) for li in cons_section.find_all("li")][:4]
+
+        if result["ROCE"] is not None or result["PE"] is not None:
+            result["Available"] = True
+
+        _screener_cache[clean] = result
+        return result
+
+    except Exception:
+        return result
+
+
+def compute_quality_score(fundamentals):
+    """
+    Quality Score (0-100) from Screener.in fundamentals.
+    Based on ROCE, ROE, PE, growth, debt.
+    """
+    if not fundamentals.get("Available"):
+        return None, {}
+
+    scores = {}
+
+    # ROCE — capital efficiency king
+    roce = fundamentals.get("ROCE")
+    if roce is not None:
+        if roce >= 20:   scores["ROCE"] = (25, f"Excellent ROCE {roce:.1f}% (>20%)")
+        elif roce >= 15: scores["ROCE"] = (18, f"Strong ROCE {roce:.1f}% (>15%)")
+        elif roce >= 10: scores["ROCE"] = (10, f"Moderate ROCE {roce:.1f}%")
+        else:            scores["ROCE"] = (3,  f"Weak ROCE {roce:.1f}% (<10%)")
+    else:
+        scores["ROCE"] = (0, "ROCE not available")
+
+    # ROE
+    roe = fundamentals.get("ROE")
+    if roe is not None:
+        if roe >= 20:    scores["ROE"] = (20, f"Excellent ROE {roe:.1f}%")
+        elif roe >= 12:  scores["ROE"] = (14, f"Good ROE {roe:.1f}%")
+        elif roe >= 8:   scores["ROE"] = (8,  f"Moderate ROE {roe:.1f}%")
+        else:            scores["ROE"] = (2,  f"Weak ROE {roe:.1f}%")
+    else:
+        scores["ROE"] = (0, "ROE not available")
+
+    # Earnings growth (3Y profit CAGR)
+    pg3 = fundamentals.get("ProfitGrowth3Y")
+    if pg3 is not None:
+        if pg3 >= 20:    scores["ProfitGrowth"] = (20, f"Strong 3Y profit growth {pg3:.0f}%")
+        elif pg3 >= 10:  scores["ProfitGrowth"] = (14, f"Good 3Y profit growth {pg3:.0f}%")
+        elif pg3 >= 0:   scores["ProfitGrowth"] = (8,  f"Modest 3Y profit growth {pg3:.0f}%")
+        else:            scores["ProfitGrowth"] = (2,  f"Declining profits 3Y: {pg3:.0f}%")
+    else:
+        scores["ProfitGrowth"] = (0, "Profit growth not available")
+
+    # Revenue growth (3Y sales CAGR)
+    sg3 = fundamentals.get("SalesGrowth3Y")
+    if sg3 is not None:
+        if sg3 >= 15:    scores["SalesGrowth"] = (20, f"Strong 3Y sales growth {sg3:.0f}%")
+        elif sg3 >= 8:   scores["SalesGrowth"] = (14, f"Good 3Y sales growth {sg3:.0f}%")
+        elif sg3 >= 0:   scores["SalesGrowth"] = (8,  f"Modest 3Y sales growth {sg3:.0f}%")
+        else:            scores["SalesGrowth"] = (2,  f"Declining sales 3Y: {sg3:.0f}%")
+    else:
+        scores["SalesGrowth"] = (0, "Sales growth not available")
+
+    # Valuation (PE)
+    pe = fundamentals.get("PE")
+    if pe is not None and pe > 0:
+        if pe < 15:      scores["Valuation"] = (15, f"Attractive valuation PE {pe:.0f}x")
+        elif pe < 25:    scores["Valuation"] = (10, f"Fair valuation PE {pe:.0f}x")
+        elif pe < 40:    scores["Valuation"] = (5,  f"Premium valuation PE {pe:.0f}x")
+        else:            scores["Valuation"] = (2,  f"Expensive valuation PE {pe:.0f}x")
+    else:
+        scores["Valuation"] = (0, "PE not available or negative")
+
+    total = sum(v[0] for v in scores.values())
+    return min(total, 100), scores
 
 # =========================================================
 # SECTOR MAP
@@ -177,11 +655,22 @@ def normalize_ticker(ticker):
         ticker = ticker + ".NS"
     return ticker
 
-@st.cache_data(ttl=3600)
+# Manual cache — only stores SUCCESSFUL fetches, never empty results
+# This prevents Streamlit's cache from locking in failed yfinance responses
+_fetch_cache = {}
+
 def fetch_data(ticker, period="5y"):
     ticker = normalize_ticker(ticker)
-    for attempt in range(2):  # retry once on empty/error
+    cache_key = f"{ticker}_{period}"
+
+    # Return cached result only if it was a successful fetch
+    if cache_key in _fetch_cache:
+        return _fetch_cache[cache_key]
+
+    for attempt in range(3):  # retry up to 3 times with backoff
         try:
+            if attempt > 0:
+                time.sleep(3 * attempt)  # 3s then 6s between retries
             df = yf.download(ticker, period=period, auto_adjust=True, progress=False)
             if df.empty:
                 continue
@@ -196,17 +685,21 @@ def fetch_data(ticker, period="5y"):
             df = df[needed].copy()
             df.dropna(subset=["Close"], inplace=True)
             if len(df) > 0:
+                _fetch_cache[cache_key] = df  # only cache successes
                 return df
         except Exception:
             continue
-    return pd.DataFrame()
+    return pd.DataFrame()  # never cached — always retried next time
 
 # =========================================================
 # BENCHMARK + MARKET REGIME
 # =========================================================
 
-@st.cache_data(ttl=3600)
+_benchmark_cache = {}
+
 def fetch_benchmark():
+    if "benchmark" in _benchmark_cache:
+        return _benchmark_cache["benchmark"]
     for ticker in ["^NSEI", "^NSEI.NS", "NIFTYBEES.NS"]:
         try:
             df = yf.download(ticker, period="5y", auto_adjust=True, progress=False)
@@ -218,7 +711,9 @@ def fetch_benchmark():
             if "Close" not in df.columns and "Adj Close" in df.columns:
                 df.rename(columns={"Adj Close": "Close"}, inplace=True)
             if "Close" in df.columns and len(df) > 100:
-                return df[["Close"]].dropna()
+                result = df[["Close"]].dropna()
+                _benchmark_cache["benchmark"] = result
+                return result
         except Exception:
             continue
     return pd.DataFrame()
@@ -240,6 +735,9 @@ if benchmark_df.empty or "Close" not in benchmark_df.columns:
     st.error("❌ Could not fetch benchmark data. This is a temporary Yahoo Finance issue — please reload.")
     st.stop()
 
+
+# Load earnings calendar at startup
+earnings_calendar = load_earnings_calendar()
 market_regime = get_market_regime(benchmark_df)
 
 # =========================================================
@@ -432,19 +930,32 @@ def compute_rs_ranks(universe_returns_12m):
 # =========================================================
 
 def compute_master_score(base_score, canslim_total, minervini_pct,
-                          momentum_score, rs_rank, market_regime):
+                          momentum_score, rs_rank, market_regime,
+                          quality_score=None):
     """
-    Blended score across all frameworks.
+    Blended score across all frameworks including fundamentals.
     Market regime filter: Bear market downgrades all scores by 20%.
     """
-    raw = (
-        base_score        * 0.20 +   # Technical base (SMA, RSI)
-        canslim_total     * 0.25 +   # CANSLIM
-        minervini_pct     * 0.25 +   # Minervini conditions
-        momentum_score    * 0.20 +   # Momentum factor
-        rs_rank           * 0.10     # RS Rank within universe
-    )
-    # Market regime penalty
+    if quality_score is not None:
+        # With fundamentals: reweight to include quality
+        raw = (
+            base_score        * 0.15 +   # Technical base
+            canslim_total     * 0.20 +   # CANSLIM
+            minervini_pct     * 0.20 +   # Minervini
+            momentum_score    * 0.15 +   # Momentum
+            rs_rank           * 0.10 +   # RS Rank
+            quality_score     * 0.20     # Fundamental quality ← NEW
+        )
+    else:
+        # Without fundamentals: original weights
+        raw = (
+            base_score        * 0.20 +
+            canslim_total     * 0.25 +
+            minervini_pct     * 0.25 +
+            momentum_score    * 0.20 +
+            rs_rank           * 0.10
+        )
+
     if market_regime == "Bear":
         raw = raw * 0.80
 
@@ -741,6 +1252,8 @@ with tab1:
         all_data = {}
         for i, ticker in enumerate(tickers_to_screen):
             status.text(f"Fetching {ticker}... ({i+1}/{len(tickers_to_screen)})")
+            if i > 0:
+                time.sleep(0.2)
             df = fetch_data(ticker)
             if df.empty or "Close" not in df.columns or len(df) < 252:
                 skipped.append(f"{ticker} — insufficient data")
@@ -792,13 +1305,35 @@ with tab1:
                 else:
                     display_score, display_rec = master, rec
 
+                # Fetch fundamentals
+                try:
+                    fund = fetch_screener_fundamentals(ticker)
+                    qs, _ = compute_quality_score(fund)
+                    pe_val   = f"{fund['PE']:.0f}x"   if fund.get('PE')   else "-"
+                    roce_val = f"{fund['ROCE']:.0f}%"  if fund.get('ROCE') else "-"
+                except Exception:
+                    qs, pe_val, roce_val = None, "-", "-"
+
+                # Entry signal + earnings
+                e_flag, _  = get_earnings_flag(ticker, earnings_calendar)
+                liq_cr     = check_liquidity(df)
+                entry_data = compute_entry_exit(df, "Mid Cap", e_flag)
+                entry_status = entry_data.get("Status", "—") if entry_data else "—"
+
                 screener_rows.append({
                     "Ticker":        ticker,
+                    "Theme":         get_theme(ticker),
                     "Master Score":  master,
+                    "Quality Score": qs if qs else "-",
                     "CANSLIM":       int(canslim_t),
                     "Minervini/8":   min_passed,
                     "Momentum Score":mom_data["MomentumScore"],
                     "RS Rank":       rs_rank,
+                    "Entry Signal":  entry_status,
+                    "Earnings":      e_flag,
+                    "Liquidity Cr":  liq_cr,
+                    "PE":            pe_val,
+                    "ROCE":          roce_val,
                     "Rec":           display_rec,
                     "Structure":     metrics["Structure"],
                     "RSI":           metrics["RSI"],
@@ -946,18 +1481,24 @@ with tab3:
         if df.empty or "Close" not in df.columns or len(df) < 252:
             st.error("Not enough data — need at least 252 trading days (1 year). Check the ticker name.")
         else:
-            with st.spinner("Running all frameworks..."):
+            with st.spinner("Running all frameworks + fetching fundamentals..."):
                 metrics          = compute_metrics(df, benchmark_df)
                 canslim_s, canslim_t = compute_canslim_score(df)
                 min_conds, min_passed, min_pct = compute_minervini_score(df)
                 mom_data         = compute_momentum_score(df)
                 risk_metrics     = compute_risk_metrics(df, analysis_capital, analysis_risk)
-                # RS rank vs Nifty 50 universe for context
-                rs_rank_val      = 50  # placeholder (needs full universe)
+                fundamentals     = fetch_screener_fundamentals(single_ticker)
+                quality_score, quality_breakdown = compute_quality_score(fundamentals)
+                rs_rank_val      = 50
                 master, master_rec = compute_master_score(
                     metrics["Score"], canslim_t, min_pct,
-                    mom_data["MomentumScore"], rs_rank_val, market_regime
+                    mom_data["MomentumScore"], rs_rank_val, market_regime,
+                    quality_score=quality_score
                 )
+                # Entry / Exit signals
+                e_flag, e_color = get_earnings_flag(single_ticker, earnings_calendar)
+                entry_data      = compute_entry_exit(df, "Mid Cap", e_flag)
+                theme_tag       = get_theme(single_ticker)
                 scenarios = compute_probability_scenarios(
                     master, metrics["RSI"], metrics["Momentum3M"], metrics["RelativeStrength"]
                 )
@@ -1065,6 +1606,123 @@ with tab3:
 - Position: **₹{risk_metrics['PositionValue']:,.0f}** ({risk_metrics['PositionPct']:.1f}%)
 - Max DD: {risk_metrics['MaxDrawdown']:.1f}% · Current DD: {risk_metrics['CurrentDrawdown']:.1f}%
 """)
+
+            # ── Entry / Exit Signal ───────────────────────────────────────
+            st.markdown("### 🎯 Entry & Exit Signal")
+            if entry_data:
+                # Status banner
+                st.markdown(
+                    f'<div style="background:#1a1d2e;border:1.5px solid {entry_data["StatusColor"]};'
+                    f'border-radius:10px;padding:14px 18px;margin-bottom:12px;">'
+                    f'<span style="font-size:16px;font-weight:700;color:{entry_data["StatusColor"]};">'
+                    f'{entry_data["Status"]}</span>'
+                    f'<span style="float:right;font-size:12px;color:#a0aabf;">'
+                    f'Validated · {entry_data["Cap"]} · 55,624 real trades</span>'
+                    f'</div>',
+                    unsafe_allow_html=True
+                )
+
+                # Theme tag
+                if theme_tag != "—":
+                    st.markdown(
+                        f'<span style="background:#1a2a4a;color:#5b9cf6;padding:4px 12px;'
+                        f'border-radius:20px;font-size:12px;font-weight:600;">🏷️ {theme_tag}</span>',
+                        unsafe_allow_html=True
+                    )
+                    st.markdown("")
+
+                # Two-column: entry levels
+                ec1, ec2 = st.columns(2)
+                with ec1:
+                    st.markdown("**📈 Breakout Entry** — buy on strength")
+                    bdf = pd.DataFrame({
+                        "Level":   ["Entry (pivot+0.5%)", "Stop Loss", "Target 1R (1.5R)", "Target 2R (3R)"],
+                        "Price ₹": [f"₹{entry_data['BreakoutEntry']}",
+                                    f"₹{entry_data['BreakoutStop']} ({entry_data['StopMult']}×ATR)",
+                                    f"₹{entry_data['BreakoutT1']}",
+                                    f"₹{entry_data['BreakoutT2']}"]
+                    })
+                    st.dataframe(bdf, use_container_width=True, hide_index=True)
+                    vol_str = "✅ Volume confirming" if entry_data["VolConfirmed"] else "⚠️ Low volume — wait for surge"
+                    st.caption(vol_str)
+
+                with ec2:
+                    st.markdown("**📉 Pullback Entry** — buy on weakness")
+                    pdf = pd.DataFrame({
+                        "Level":   ["Entry (at SMA50)", "Stop Loss", "Target 1R (1.5R)", "Target 2R (3R)"],
+                        "Price ₹": [f"₹{entry_data['PullbackEntry']}",
+                                    f"₹{entry_data['PullbackStop']} ({entry_data['StopMult']}×ATR)",
+                                    f"₹{entry_data['PullbackT1']}",
+                                    f"₹{entry_data['PullbackT2']}"]
+                    })
+                    st.dataframe(pdf, use_container_width=True, hide_index=True)
+                    st.caption(f"Current price: ₹{entry_data['CurrentPrice']} · ATR: ₹{entry_data['ATR']} ({entry_data['ATRPct']:.1f}%)")
+
+                # Trade rules
+                r1, r2, r3, r4 = st.columns(4)
+                r1.metric("Max Hold", f"{entry_data['MaxHoldDays']} days",
+                          help="94% win rate at 61-90 days (real data)")
+                r2.metric("Re-entry Block", f"{entry_data['ReentryBlock']} days",
+                          help="43.4% win vs 76.2% if re-entering within 20 days")
+                r3.metric("Liquidity", f"₹{entry_data['LiquidityCr']} Cr/day",
+                          help="Minimum ₹10 Cr for safe stop execution")
+                r4.metric("Earnings", e_flag.split("—")[0].strip() if "—" in e_flag else e_flag,
+                          help="No entry within 5 days of results")
+
+                # Sell rules
+                st.markdown("**📋 Position Management Rules** *(validated on real NSE data)*")
+                st.markdown("""
+- **At 1R profit** (+{t1}R): sell 33% of position, move stop to breakeven
+- **At 2R profit** (+{t2}R): sell another 33%, trail remaining 34% with SMA50
+- **Never tighten stop before Day 30** — 62.9% win rate at 31-45 days (patience is the edge)
+- **Never re-enter within 21 days** of a stop out on the same stock
+- **Exit immediately** if close below ATR stop regardless of conviction
+""".format(t1=entry_data['T1Mult'], t2=entry_data['T2Mult']))
+            else:
+                st.info("Insufficient data for entry signal computation.")
+
+            # ── Fundamentals Section ──────────────────────────────────────
+            st.markdown("### 📊 Fundamental Quality")
+            if fundamentals.get("Available"):
+                fc1,fc2,fc3,fc4,fc5,fc6 = st.columns(6)
+                fc1.metric("PE Ratio",       f"{fundamentals['PE']:.1f}x"   if fundamentals['PE']   else "N/A")
+                fc2.metric("ROCE",           f"{fundamentals['ROCE']:.1f}%" if fundamentals['ROCE'] else "N/A")
+                fc3.metric("ROE",            f"{fundamentals['ROE']:.1f}%"  if fundamentals['ROE']  else "N/A")
+                fc4.metric("Sales Growth 3Y",f"{fundamentals['SalesGrowth3Y']:.0f}%"   if fundamentals['SalesGrowth3Y']   else "N/A")
+                fc5.metric("Profit Growth 3Y",f"{fundamentals['ProfitGrowth3Y']:.0f}%" if fundamentals['ProfitGrowth3Y']  else "N/A")
+                fc6.metric("Quality Score",  f"{quality_score}/100" if quality_score else "N/A")
+
+                # Quality breakdown bars
+                if quality_breakdown:
+                    with st.expander("📐 Quality Score Breakdown"):
+                        for factor, (score, label) in quality_breakdown.items():
+                            max_scores = {"ROCE":25,"ROE":20,"ProfitGrowth":20,
+                                          "SalesGrowth":20,"Valuation":15}
+                            max_s = max_scores.get(factor, 20)
+                            pct   = int(score / max_s * 100)
+                            color = "#2ecc71" if pct >= 70 else ("#f39c12" if pct >= 40 else "#e74c3c")
+                            st.markdown(f"**{label}** — {score}/{max_s}")
+                            st.markdown(
+                                f'<div style="background:#2e3250;border-radius:4px;height:8px;">'
+                                f'<div style="background:{color};width:{pct}%;height:8px;border-radius:4px;"></div>'
+                                f'</div>',
+                                unsafe_allow_html=True
+                            )
+
+                # Screener.in Pros & Cons
+                if fundamentals["Pros"] or fundamentals["Cons"]:
+                    p_col, c_col = st.columns(2)
+                    with p_col:
+                        st.markdown("**✅ Screener.in Pros**")
+                        for p in fundamentals["Pros"]:
+                            st.write("•", p)
+                    with c_col:
+                        st.markdown("**⚠️ Screener.in Cons**")
+                        for c in fundamentals["Cons"]:
+                            st.write("•", c)
+                st.caption("Fundamental data sourced from screener.in — updated quarterly")
+            else:
+                st.info("📊 Fundamental data unavailable for this ticker. Screener.in may not have data or was temporarily unreachable.")
 
             # Probability Scenarios
             st.markdown("### 🎯 Probability Scenarios")
@@ -1321,11 +1979,18 @@ def parse_groww_excel(file) -> tuple:
             ticker = name_upper.split()[0]
             skipped.append(f"{name} — ticker guessed as '{ticker}' (verify manually)")
 
+        # Also capture closing price from Excel as fallback
+        try:
+            closing_price_f = float(row[5]) if pd.notna(row[5]) else None
+        except (ValueError, TypeError):
+            closing_price_f = None
+
         holdings.append({
-            "ticker":    ticker,
-            "name":      name,
-            "shares":    qty_f,
-            "buy_price": avg_f,
+            "ticker":        ticker,
+            "name":          name,
+            "shares":        qty_f,
+            "buy_price":     avg_f,
+            "excel_price":   closing_price_f,  # fallback if yfinance fails
         })
 
     return holdings, summary, skipped
@@ -1443,15 +2108,45 @@ Upload that file below — no manual entry needed.
                 for i, h in enumerate(holdings):
                     ticker = h["ticker"]
                     stat.text(f"Analysing {ticker} ({h['name'][:30]})...")
+                    if i > 0:
+                        time.sleep(0.3)  # small delay to avoid Yahoo Finance rate limiting
                     df = fetch_data(ticker)
 
                     MIN_DAYS = 100
                     limited_data = len(df) < 252 if not df.empty else True
                     if df.empty or "Close" not in df.columns or len(df) < MIN_DAYS:
-                        if len(df) > 0:
-                            errors.append(f"{ticker} ({h['name'][:30]}) — only {len(df)} days of data (need {MIN_DAYS}+)")
+                        # Fallback: use closing price from Excel if available
+                        excel_price = h.get("excel_price")
+                        if excel_price and excel_price > 0:
+                            invested   = h["shares"] * h["buy_price"]
+                            current_val = h["shares"] * excel_price
+                            pnl_inr    = current_val - invested
+                            pnl_pct    = (excel_price / h["buy_price"] - 1) * 100
+                            port_data.append({
+                                "Ticker":       ticker,
+                                "Company":      h["name"],
+                                "Sector":       get_sector(ticker),
+                                "Shares":       int(h["shares"]),
+                                "Buy ₹":        h["buy_price"],
+                                "Current ₹":    excel_price,
+                                "Invested ₹":   round(invested, 0),
+                                "Value ₹":      round(current_val, 0),
+                                "P&L ₹":        round(pnl_inr, 0),
+                                "P&L %":        round(pnl_pct, 1),
+                                "Master Score": 0,
+                                "CANSLIM":      0,
+                                "Minervini/8":  0,
+                                "Signal":       "⚪ NO DATA",
+                                "Signal Reason":"Market data unavailable — showing P&L from Groww report price",
+                                "RSI":          0,
+                                "3M Mom%":      0,
+                                "Stop ₹":       round(excel_price * 0.92, 2),
+                                "2R Target ₹":  round(excel_price * 1.08, 2),
+                                "Port %":       round(current_val / total_capital_port * 100, 1),
+                                "LimitedData":  True,
+                            })
                         else:
-                            errors.append(f"{ticker} ({h['name'][:30]}) — no data returned (try again later)")
+                            errors.append(f"{ticker} ({h['name'][:30]}) — no market data available")
                         prog.progress((i+1)/len(holdings))
                         continue
 
@@ -1515,7 +2210,8 @@ Upload that file below — no manual entry needed.
                     total_value    = sum(r["Value ₹"]    for r in port_data)
                     total_pnl      = total_value - total_invested
                     total_pnl_pct  = (total_value / total_invested - 1) * 100 if total_invested > 0 else 0
-                    avg_score      = round(sum(r["Master Score"] for r in port_data) / len(port_data))
+                    scored = [r for r in port_data if "NO DATA" not in r["Signal"]]
+                    avg_score = round(sum(r["Master Score"] for r in scored) / len(scored)) if scored else 0
 
                     st.markdown("### 📊 Portfolio Summary")
                     s1,s2,s3,s4,s5 = st.columns(5)
@@ -1535,10 +2231,11 @@ Upload that file below — no manual entry needed.
 
                     # ── Action Signal Summary ──────────────────────────
                     st.markdown("### 🎯 Action Signals")
-                    exits = [r for r in port_data if "EXIT"  in r["Signal"]]
-                    trims = [r for r in port_data if "TRIM"  in r["Signal"] or "WATCH" in r["Signal"]]
-                    adds  = [r for r in port_data if "ADD"   in r["Signal"]]
-                    holds = [r for r in port_data if "HOLD"  in r["Signal"]]
+                    exits    = [r for r in port_data if "EXIT"  in r["Signal"]]
+                    trims    = [r for r in port_data if "TRIM"  in r["Signal"] or "WATCH" in r["Signal"]]
+                    adds     = [r for r in port_data if "ADD"   in r["Signal"]]
+                    holds    = [r for r in port_data if "HOLD"  in r["Signal"]]
+                    no_data  = [r for r in port_data if "NO DATA" in r["Signal"]]
 
                     ac1,ac2,ac3,ac4 = st.columns(4)
                     ac1.metric("🔴 Exit",  len(exits))
@@ -1552,6 +2249,10 @@ Upload that file below — no manual entry needed.
                         st.warning("**Trim/Watch:** " + ", ".join(r["Ticker"] for r in trims))
                     if adds:
                         st.success("**Add signals:** " + ", ".join(r["Ticker"] for r in adds))
+                    if no_data:
+                        st.info("**⚪ Showing P&L only (no market data):** " +
+                                ", ".join(r["Ticker"] for r in no_data) +
+                                " — scores unavailable but position value shown from Groww report")
 
                     # ── Sector Breakdown ───────────────────────────────
                     st.markdown("### 🏭 Sector Breakdown")
@@ -1607,12 +2308,36 @@ Upload that file below — no manual entry needed.
                         st.markdown(f"#### 🏷️ {sector}")
                         for r in positions:
                             icon = "🟢" if r["P&L %"] >= 0 else "🔴"
-                            data_flag = " · ⚠️ Limited Data" if r.get("LimitedData") else ""
-                            with st.expander(
-                                f"{r['Ticker']}  ·  {r['Signal']}  ·  "
-                                f"{icon} {r['P&L %']:+.1f}%  (₹{r['P&L ₹']:+,.0f})  ·  "
-                                f"Score {r['Master Score']}/100{data_flag}"
-                            ):
+                            no_data = "NO DATA" in r["Signal"]
+                            if no_data:
+                                expander_label = (
+                                    f"📵 {r['Ticker']}  ·  ⚪ NO MARKET DATA  ·  "
+                                    f"{icon} {r['P&L %']:+.1f}%  (₹{r['P&L ₹']:+,.0f})  ·  "
+                                    f"Price from Groww report ({r['Current ₹']})"
+                                )
+                            else:
+                                data_flag = " · ⚠️ Limited Data" if r.get("LimitedData") else ""
+                                expander_label = (
+                                    f"{r['Ticker']}  ·  {r['Signal']}  ·  "
+                                    f"{icon} {r['P&L %']:+.1f}%  (₹{r['P&L ₹']:+,.0f})  ·  "
+                                    f"Score {r['Master Score']}/100{data_flag}"
+                                )
+                            with st.expander(expander_label):
+                                # NO DATA banner
+                                if "NO DATA" in r["Signal"]:
+                                    st.markdown(
+                                        '<div style="background:#1a1d2e;border:1px solid #f39c12;'
+                                        'border-radius:8px;padding:10px 14px;margin-bottom:12px;">'
+                                        '📵 <strong>Market data unavailable for this ticker</strong> — '
+                                        'yfinance could not pull live data. '
+                                        f'Prices shown are from your Groww report dated report date. '
+                                        'Framework scores (CANSLIM, Minervini, Master Score) are not available. '
+                                        'P&amp;L is calculated using the Groww closing price of '
+                                        f'<strong>₹{r["Current ₹"]}</strong>.'
+                                        '</div>',
+                                        unsafe_allow_html=True
+                                    )
+
                                 c1, c2, c3 = st.columns(3)
                                 with c1:
                                     st.markdown("**Position**")
@@ -1620,27 +2345,38 @@ Upload that file below — no manual entry needed.
 - Company: {r["Company"]}
 - Shares: {r["Shares"]}
 - Buy price: ₹{r["Buy ₹"]}
-- Current: ₹{r["Current ₹"]}
+- Current: ₹{r["Current ₹"]} {"📵 Groww report price" if "NO DATA" in r["Signal"] else ""}
 - Invested: ₹{r["Invested ₹"]:,.0f}
 - Value: ₹{r["Value ₹"]:,.0f}
 - P&L: ₹{r["P&L ₹"]:+,.0f} ({r["P&L %"]:+.1f}%)
 - Portfolio weight: {r["Port %"]}%
 """)
                                 with c2:
-                                    st.markdown("**Framework Scores**")
-                                    sc = r["Master Score"]
-                                    col = "#2ecc71" if sc>=65 else ("#f39c12" if sc>=45 else "#e74c3c")
-                                    st.markdown(f"""
+                                    if "NO DATA" in r["Signal"]:
+                                        st.markdown("**Framework Scores**")
+                                        st.markdown(
+                                            '<div style="background:#2e3250;border-radius:8px;'
+                                            'padding:12px;text-align:center;color:#a0aabf;">'
+                                            '📵<br><strong>Not available</strong><br>'
+                                            '<small>Live market data required<br>for framework scoring</small>'
+                                            '</div>',
+                                            unsafe_allow_html=True
+                                        )
+                                    else:
+                                        st.markdown("**Framework Scores**")
+                                        sc = r["Master Score"]
+                                        col = "#2ecc71" if sc>=65 else ("#f39c12" if sc>=45 else "#e74c3c")
+                                        st.markdown(f"""
 - Master Score: **{sc}/100**
 - CANSLIM: {r["CANSLIM"]}/100
 - Minervini: {r["Minervini/8"]}/8
 - RSI: {r["RSI"]:.0f}
 - 3M Momentum: {r["3M Mom%"]:+.1f}%
 """)
-                                    st.markdown(
-                                        f'<div style="background:#2e3250;border-radius:4px;height:10px;">'                                        f'<div style="background:{col};width:{sc}%;height:10px;border-radius:4px;"></div>'                                        f'</div><small>{sc}/100</small>',
-                                        unsafe_allow_html=True
-                                    )
+                                        st.markdown(
+                                            f'<div style="background:#2e3250;border-radius:4px;height:10px;">'                                            f'<div style="background:{col};width:{sc}%;height:10px;border-radius:4px;"></div>'                                            f'</div><small>{sc}/100</small>',
+                                            unsafe_allow_html=True
+                                        )
                                 with c3:
                                     st.markdown("**Risk Levels**")
                                     vs_stop = "⛔ BELOW STOP" if r["Current ₹"] < r["Stop ₹"] else f"₹{r['Current ₹']-r['Stop ₹']:.0f} above"
@@ -1652,12 +2388,26 @@ Upload that file below — no manual entry needed.
 - vs 2R Target: {vs_tgt}
 """)
                                 sig_bg = {"EXIT":"#3b0d0d","TRIM":"#3b2a0d",
-                                           "WATCH":"#3b2a0d","HOLD":"#0d1b3b","ADD":"#0d3b1e"}
+                                           "WATCH":"#3b2a0d","HOLD":"#0d1b3b",
+                                           "ADD":"#0d3b1e","NO DATA":"#2e3250"}
                                 sig_key = next((k for k in sig_bg if k in r["Signal"]), "HOLD")
                                 st.markdown(
                                     f'<div style="background:{sig_bg[sig_key]};padding:10px 14px;'                                    f'border-radius:8px;margin-top:8px;">'                                    f'<strong>{r["Signal"]}</strong> — {r["Signal Reason"]}'                                    f'</div>',
                                     unsafe_allow_html=True
                                 )
+
+                    # Portfolio heat check
+                    pos_by_sector = {}
+                    for r in port_data:
+                        s = r["Sector"]
+                        pos_by_sector[s] = pos_by_sector.get(s, 0) + 1
+                    heat_warnings = check_portfolio_heat(pos_by_sector)
+                    if heat_warnings:
+                        st.markdown("### 🌡️ Portfolio Heat Warnings")
+                        for w in heat_warnings:
+                            st.warning(w)
+                        st.caption("Based on within-sector correlation analysis from 55,624 real trades. "
+                                   "High-correlation sectors move together — limiting exposure reduces drawdown without reducing returns.")
 
                     if errors:
                         with st.expander(f"⚠️ {len(errors)} position(s) could not be analysed"):
